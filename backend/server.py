@@ -206,29 +206,71 @@ async def list_models():
     """List available V-JEPA2 models."""
     return {
         "models": [
+            # Standard Models
             {
                 "id": "facebook/vjepa2-vitl-fpc64-256",
                 "name": "V-JEPA2 ViT-Large",
+                "type": "standard",
                 "params": "300M",
-                "resolution": 256
+                "resolution": 256,
+                "description": "Lightweight model for faster inference"
             },
             {
                 "id": "facebook/vjepa2-vith-fpc64-256",
                 "name": "V-JEPA2 ViT-Huge",
+                "type": "standard",
                 "params": "600M",
-                "resolution": 256
+                "resolution": 256,
+                "description": "Balanced accuracy and speed"
             },
             {
                 "id": "facebook/vjepa2-vitg-fpc64-256",
                 "name": "V-JEPA2 ViT-Giant",
+                "type": "standard",
                 "params": "1B",
-                "resolution": 256
+                "resolution": 256,
+                "description": "Best accuracy, slower inference"
             },
             {
                 "id": "facebook/vjepa2-vitg-fpc64-384",
                 "name": "V-JEPA2 ViT-Giant 384",
+                "type": "standard",
                 "params": "1B",
-                "resolution": 384
+                "resolution": 384,
+                "description": "High-resolution variant"
+            },
+            # Action-Conditioned Models
+            {
+                "id": "vjepa2_ac_vit_large",
+                "name": "V-JEPA2 AC ViT-Large",
+                "type": "action_conditioned",
+                "params": "300M",
+                "resolution": 256,
+                "description": "Action-conditioned prediction (PyTorch Hub)"
+            },
+            {
+                "id": "vjepa2_ac_vit_huge",
+                "name": "V-JEPA2 AC ViT-Huge",
+                "type": "action_conditioned",
+                "params": "600M",
+                "resolution": 256,
+                "description": "Medium AC model (PyTorch Hub)"
+            },
+            {
+                "id": "vjepa2_ac_vit_giant",
+                "name": "V-JEPA2 AC ViT-Giant ✓",
+                "type": "action_conditioned",
+                "params": "1B",
+                "resolution": 256,
+                "description": "Confirmed available (PyTorch Hub)"
+            },
+            {
+                "id": "vjepa2_ac_vit_giant_384",
+                "name": "V-JEPA2 AC ViT-Giant 384",
+                "type": "action_conditioned",
+                "params": "1B",
+                "resolution": 384,
+                "description": "High-res AC model (PyTorch Hub)"
             }
         ]
     }

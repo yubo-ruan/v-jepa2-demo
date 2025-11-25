@@ -23,8 +23,10 @@ interface ModelState {
 interface ModelInfo {
   id: string;
   name: string;
+  type: "standard" | "action_conditioned";
   params: string;
   resolution: number;
+  description: string;
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -219,12 +221,38 @@ export default function Home() {
                   disabled={isLoading}
                   className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-gray-200 focus:outline-none focus:border-blue-500 disabled:opacity-50"
                 >
-                  {models.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name} ({model.params}, {model.resolution}px)
-                    </option>
-                  ))}
+                  {/* Group by model type */}
+                  <optgroup label="📊 Standard Models">
+                    {models
+                      .filter((m) => m.type === "standard")
+                      .map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.name} ({model.params}, {model.resolution}px)
+                        </option>
+                      ))}
+                  </optgroup>
+                  <optgroup label="🎯 Action-Conditioned Models">
+                    {models
+                      .filter((m) => m.type === "action_conditioned")
+                      .map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.name} ({model.params}, {model.resolution}px)
+                        </option>
+                      ))}
+                  </optgroup>
                 </select>
+
+                {/* Model Description */}
+                {selectedModel && (
+                  <div className="mt-3 p-3 bg-gray-900/30 rounded-lg border border-gray-700/50">
+                    <p className="text-gray-400 text-xs">
+                      {
+                        models.find((m) => m.id === selectedModel)
+                          ?.description
+                      }
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 

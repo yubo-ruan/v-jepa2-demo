@@ -85,80 +85,55 @@ def update_state(
 
 
 def load_model_sync(model_name: str):
-    """Synchronously load the V-JEPA2 model with status updates."""
+    """Synchronously load the V-JEPA2 Giant model with status updates."""
     global model, processor
 
     try:
-        update_state(LoadingStatus.INITIALIZING, 10, "Initializing model loader...", model_name)
-        time.sleep(0.5)
+        update_state(LoadingStatus.INITIALIZING, 5, "Initializing...", model_name)
 
         import torch
+        from torch.hub import download_url_to_file
+        import urllib.request
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Check if this is an Action-Conditioned model (PyTorch Hub)
-        is_ac_model = model_name.startswith("vjepa2_ac_")
+        # Hook into download progress
+        original_download = download_url_to_file
 
-        if is_ac_model:
-            # Use PyTorch Hub for AC models
-            update_state(LoadingStatus.DOWNLOADING, 20, "Loading from PyTorch Hub...")
-            time.sleep(0.3)
+        def download_with_progress(url, dst, hash_prefix=None, progress=True):
+            def report(count, block_size, total_size):
+                if total_size > 0:
+                    downloaded = count * block_size
+                    percent = min(int(downloaded * 100 / total_size), 100)
+                    downloaded_gb = downloaded / (1024**3)
+                    total_gb = total_size / (1024**3)
+                    msg = f"Downloading: {downloaded_gb:.2f}GB / {total_gb:.2f}GB"
+                    update_state(LoadingStatus.DOWNLOADING, 10 + int(percent * 0.5), msg, model_name)
 
-            update_state(LoadingStatus.DOWNLOADING, 30, "Loading video preprocessor...")
-            processor = torch.hub.load('facebookresearch/vjepa2', 'vjepa2_preprocessor')
+            urllib.request.urlretrieve(url, dst, reporthook=report)
 
-            update_state(LoadingStatus.DOWNLOADING, 50, f"Downloading AC model: {model_name}...")
+        # Monkey patch for progress tracking
+        torch.hub.download_url_to_file = download_with_progress
 
-            # AC models return (encoder, predictor)
-            update_state(LoadingStatus.LOADING_WEIGHTS, 60, "Loading encoder and predictor...")
-            encoder, predictor = torch.hub.load('facebookresearch/vjepa2', model_name)
+        update_state(LoadingStatus.DOWNLOADING, 10, "Loading preprocessor...")
+        processor = torch.hub.load('facebookresearch/vjepa2', 'vjepa2_preprocessor')
 
-            update_state(LoadingStatus.LOADING_WEIGHTS, 75, "Models loaded successfully")
+        update_state(LoadingStatus.DOWNLOADING, 15, "Starting model download...")
+        encoder, predictor = torch.hub.load('facebookresearch/vjepa2', model_name)
 
-            # Move to device
-            update_state(LoadingStatus.MOVING_TO_GPU, 85, f"Moving models to {device.upper()}...")
-            encoder = encoder.to(device)
-            predictor = predictor.to(device)
+        # Restore original
+        torch.hub.download_url_to_file = original_download
 
-            # Store as tuple
-            model = (encoder, predictor)
+        update_state(LoadingStatus.LOADING_WEIGHTS, 70, "Loading weights to memory...")
+        update_state(LoadingStatus.MOVING_TO_GPU, 85, f"Moving to {device.upper()}...")
+        encoder = encoder.to(device)
+        predictor = predictor.to(device)
+        model = (encoder, predictor)
 
-        else:
-            # Use HuggingFace for standard models
-            update_state(LoadingStatus.DOWNLOADING, 20, "Importing transformers library...")
-            from transformers import AutoVideoProcessor, AutoModel
-            time.sleep(0.3)
-
-            update_state(LoadingStatus.DOWNLOADING, 40, f"Downloading model: {model_name}...")
-
-            # Load processor
-            update_state(LoadingStatus.DOWNLOADING, 50, "Loading video processor...")
-            processor = AutoVideoProcessor.from_pretrained(model_name)
-
-            # Load model
-            update_state(LoadingStatus.LOADING_WEIGHTS, 60, "Loading model weights...")
-            model = AutoModel.from_pretrained(model_name)
-
-            update_state(LoadingStatus.LOADING_WEIGHTS, 80, "Model weights loaded successfully")
-
-            # Move to GPU
-            update_state(LoadingStatus.MOVING_TO_GPU, 90, "Moving model to GPU...")
-            model = model.to(device)
-
-        update_state(
-            LoadingStatus.READY,
-            100,
-            f"Model ready on {device.upper()}",
-            model_name,
-            device
-        )
+        update_state(LoadingStatus.READY, 100, f"Ready on {device.upper()}", model_name, device)
 
     except Exception as e:
-        update_state(
-            LoadingStatus.ERROR,
-            0,
-            f"Failed to load model: {str(e)}",
-            error=str(e)
-        )
+        update_state(LoadingStatus.ERROR, 0, f"Error: {str(e)}", error=str(e))
 
 
 @app.get("/api/status")
@@ -168,9 +143,12 @@ async def get_status():
 
 
 @app.post("/api/load")
-async def load_model(model_name: str = "facebook/vjepa2-vitg-fpc64-256"):
-    """Start loading the V-JEPA2 model."""
+async def load_model():
+    """Start loading the V-JEPA2 Giant model."""
     global model_state
+
+    # Fixed model - always load vjepa2_ac_vit_giant
+    model_name = "vjepa2_ac_vit_giant"
 
     if model_state.status == LoadingStatus.READY:
         return {"message": "Model already loaded", "state": model_state}
@@ -231,54 +209,16 @@ async def stream_status():
     )
 
 
-@app.get("/api/models")
-async def list_models():
-    """List available V-JEPA2 models."""
+@app.get("/api/model-info")
+async def get_model_info():
+    """Get information about the V-JEPA2 Giant model."""
     return {
-        "models": [
-            # Standard Models
-            {
-                "id": "facebook/vjepa2-vitl-fpc64-256",
-                "name": "V-JEPA2 ViT-Large",
-                "type": "standard",
-                "params": "300M",
-                "resolution": 256,
-                "description": "Lightweight model for faster inference"
-            },
-            {
-                "id": "facebook/vjepa2-vith-fpc64-256",
-                "name": "V-JEPA2 ViT-Huge",
-                "type": "standard",
-                "params": "600M",
-                "resolution": 256,
-                "description": "Balanced accuracy and speed"
-            },
-            {
-                "id": "facebook/vjepa2-vitg-fpc64-256",
-                "name": "V-JEPA2 ViT-Giant",
-                "type": "standard",
-                "params": "1B",
-                "resolution": 256,
-                "description": "Best accuracy, slower inference"
-            },
-            {
-                "id": "facebook/vjepa2-vitg-fpc64-384",
-                "name": "V-JEPA2 ViT-Giant 384",
-                "type": "standard",
-                "params": "1B",
-                "resolution": 384,
-                "description": "High-resolution variant"
-            },
-            # Action-Conditioned Models (only confirmed available)
-            {
-                "id": "vjepa2_ac_vit_giant",
-                "name": "V-JEPA2 AC ViT-Giant",
-                "type": "action_conditioned",
-                "params": "1B",
-                "resolution": 256,
-                "description": "Action-conditioned model with encoder + predictor (PyTorch Hub)"
-            }
-        ]
+        "id": "vjepa2_ac_vit_giant",
+        "name": "V-JEPA2 AC ViT-Giant",
+        "type": "action_conditioned",
+        "params": "1B",
+        "resolution": 256,
+        "description": "Action-conditioned model with encoder + predictor. 11GB download."
     }
 
 

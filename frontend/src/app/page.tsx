@@ -20,16 +20,9 @@ interface ModelState {
   error: string | null;
 }
 
-interface ModelInfo {
-  id: string;
-  name: string;
-  type: "standard" | "action_conditioned";
-  params: string;
-  resolution: number;
-  description: string;
-}
-
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const MODEL_NAME = "V-JEPA2 AC ViT-Giant";
+const MODEL_DESCRIPTION = "Action-conditioned model with encoder + predictor (1B params, 11GB download)";
 
 const statusColors: Record<LoadingStatus, string> = {
   idle: "bg-gray-500",
@@ -60,19 +53,7 @@ export default function Home() {
     device: null,
     error: null,
   });
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>(
-    "facebook/vjepa2-vitg-fpc64-256"
-  );
   const [isLoading, setIsLoading] = useState(false);
-
-  // Fetch available models
-  useEffect(() => {
-    fetch(`${API_URL}/api/models`)
-      .then((res) => res.json())
-      .then((data) => setModels(data.models))
-      .catch((err) => console.error("Failed to fetch models:", err));
-  }, []);
 
   // Fetch initial status
   useEffect(() => {
@@ -86,8 +67,8 @@ export default function Home() {
     setIsLoading(true);
 
     try {
-      // Start loading
-      await fetch(`${API_URL}/api/load?model_name=${encodeURIComponent(selectedModel)}`, {
+      // Start loading the V-JEPA2 Giant model
+      await fetch(`${API_URL}/api/load`, {
         method: "POST",
       });
 
@@ -117,7 +98,7 @@ export default function Home() {
         error: "Connection error",
       }));
     }
-  }, [selectedModel]);
+  }, []);
 
   const unloadModel = useCallback(async () => {
     try {
@@ -209,50 +190,20 @@ export default function Home() {
               </div>
             )}
 
-            {/* Model Selector */}
+            {/* Model Info */}
             {modelState.status !== "ready" && (
               <div className="mb-6">
-                <label className="block text-gray-400 text-sm mb-2">
-                  Select Model
-                </label>
-                <select
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
-                  disabled={isLoading}
-                  className="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-gray-200 focus:outline-none focus:border-blue-500 disabled:opacity-50"
-                >
-                  {/* Group by model type */}
-                  <optgroup label="📊 Standard Models">
-                    {models
-                      .filter((m) => m.type === "standard")
-                      .map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.name} ({model.params}, {model.resolution}px)
-                        </option>
-                      ))}
-                  </optgroup>
-                  <optgroup label="🎯 Action-Conditioned Models">
-                    {models
-                      .filter((m) => m.type === "action_conditioned")
-                      .map((model) => (
-                        <option key={model.id} value={model.id}>
-                          {model.name} ({model.params}, {model.resolution}px)
-                        </option>
-                      ))}
-                  </optgroup>
-                </select>
-
-                {/* Model Description */}
-                {selectedModel && (
-                  <div className="mt-3 p-3 bg-gray-900/30 rounded-lg border border-gray-700/50">
-                    <p className="text-gray-400 text-xs">
-                      {
-                        models.find((m) => m.id === selectedModel)
-                          ?.description
-                      }
-                    </p>
+                <div className="bg-gray-900/30 rounded-lg border border-gray-700/50 p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-2xl">🎯</span>
+                    <h3 className="text-lg font-semibold text-gray-200">
+                      {MODEL_NAME}
+                    </h3>
                   </div>
-                )}
+                  <p className="text-gray-400 text-sm">
+                    {MODEL_DESCRIPTION}
+                  </p>
+                </div>
               </div>
             )}
 

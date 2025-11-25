@@ -92,27 +92,57 @@ def load_model_sync(model_name: str):
         update_state(LoadingStatus.INITIALIZING, 10, "Initializing model loader...", model_name)
         time.sleep(0.5)
 
-        update_state(LoadingStatus.DOWNLOADING, 20, "Importing transformers library...")
-        from transformers import AutoVideoProcessor, AutoModel
-        time.sleep(0.3)
-
-        update_state(LoadingStatus.DOWNLOADING, 40, f"Downloading model: {model_name}...")
-
-        # Load processor
-        update_state(LoadingStatus.DOWNLOADING, 50, "Loading video processor...")
-        processor = AutoVideoProcessor.from_pretrained(model_name)
-
-        # Load model
-        update_state(LoadingStatus.LOADING_WEIGHTS, 60, "Loading model weights...")
-        model = AutoModel.from_pretrained(model_name)
-
-        update_state(LoadingStatus.LOADING_WEIGHTS, 80, "Model weights loaded successfully")
-
-        # Move to GPU
-        update_state(LoadingStatus.MOVING_TO_GPU, 90, "Moving model to GPU...")
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
+
+        # Check if this is an Action-Conditioned model (PyTorch Hub)
+        is_ac_model = model_name.startswith("vjepa2_ac_")
+
+        if is_ac_model:
+            # Use PyTorch Hub for AC models
+            update_state(LoadingStatus.DOWNLOADING, 20, "Loading from PyTorch Hub...")
+            time.sleep(0.3)
+
+            update_state(LoadingStatus.DOWNLOADING, 30, "Loading video preprocessor...")
+            processor = torch.hub.load('facebookresearch/vjepa2', 'vjepa2_preprocessor')
+
+            update_state(LoadingStatus.DOWNLOADING, 50, f"Downloading AC model: {model_name}...")
+
+            # AC models return (encoder, predictor)
+            update_state(LoadingStatus.LOADING_WEIGHTS, 60, "Loading encoder and predictor...")
+            encoder, predictor = torch.hub.load('facebookresearch/vjepa2', model_name)
+
+            update_state(LoadingStatus.LOADING_WEIGHTS, 75, "Models loaded successfully")
+
+            # Move to device
+            update_state(LoadingStatus.MOVING_TO_GPU, 85, f"Moving models to {device.upper()}...")
+            encoder = encoder.to(device)
+            predictor = predictor.to(device)
+
+            # Store as tuple
+            model = (encoder, predictor)
+
+        else:
+            # Use HuggingFace for standard models
+            update_state(LoadingStatus.DOWNLOADING, 20, "Importing transformers library...")
+            from transformers import AutoVideoProcessor, AutoModel
+            time.sleep(0.3)
+
+            update_state(LoadingStatus.DOWNLOADING, 40, f"Downloading model: {model_name}...")
+
+            # Load processor
+            update_state(LoadingStatus.DOWNLOADING, 50, "Loading video processor...")
+            processor = AutoVideoProcessor.from_pretrained(model_name)
+
+            # Load model
+            update_state(LoadingStatus.LOADING_WEIGHTS, 60, "Loading model weights...")
+            model = AutoModel.from_pretrained(model_name)
+
+            update_state(LoadingStatus.LOADING_WEIGHTS, 80, "Model weights loaded successfully")
+
+            # Move to GPU
+            update_state(LoadingStatus.MOVING_TO_GPU, 90, "Moving model to GPU...")
+            model = model.to(device)
 
         update_state(
             LoadingStatus.READY,

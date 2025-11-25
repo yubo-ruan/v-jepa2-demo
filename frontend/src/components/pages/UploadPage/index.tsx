@@ -38,19 +38,32 @@ export function UploadPage() {
     estimatedCost,
   } = usePlanning();
 
-  const { preset, samples, iterations, currentImage, goalImage, hasResults, isProcessing } = planningState;
+  const { preset, samples, iterations, currentImage, goalImage, hasResults, isProcessing, progress, result, error } = planningState;
 
-  // Convergence data for mini chart (memoized)
-  const convergenceData = useMemo(
-    () => [8, 6.5, 5.2, 4.1, 3.5, 3.1, 2.8, 2.6, 2.5, 2.45],
-    []
-  );
+  // Use real energy history from result, or build from progress updates
+  const convergenceData = useMemo(() => {
+    if (result?.energyHistory && result.energyHistory.length > 0) {
+      return result.energyHistory;
+    }
+    // Default mock data for display
+    return [8, 6.5, 5.2, 4.1, 3.5, 3.1, 2.8, 2.6, 2.5, 2.45];
+  }, [result?.energyHistory]);
 
-  const getBarColor = (progress: number) => {
-    if (progress < 0.5) return "from-red-500 to-orange-400";
-    if (progress < 0.8) return "from-yellow-500 to-lime-400";
+  const getBarColor = (progressRatio: number) => {
+    if (progressRatio < 0.5) return "from-red-500 to-orange-400";
+    if (progressRatio < 0.8) return "from-yellow-500 to-lime-400";
     return "from-green-500 to-emerald-400";
   };
+
+  // Format seconds to mm:ss
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
+  // Calculate progress percentage
+  const progressPercent = progress ? Math.round((progress.iteration / progress.totalIterations) * 100) : 0;
 
   return (
     <>
@@ -238,10 +251,10 @@ export function UploadPage() {
             <div className="mb-5">
               <div className="flex justify-between text-sm mb-2">
                 <span className="text-zinc-300 font-medium">Processing</span>
-                <span className="text-indigo-400 font-medium">40%</span>
+                <span className="text-indigo-400 font-medium">{progressPercent}%</span>
               </div>
               <div className="h-3 bg-zinc-700 rounded-full overflow-hidden">
-                <div className="h-full bg-gradient-to-r from-indigo-600 to-purple-500 rounded-full transition-all animate-pulse" style={{ width: "40%" }} />
+                <div className="h-full bg-gradient-to-r from-indigo-600 to-purple-500 rounded-full transition-all" style={{ width: `${progressPercent}%` }} />
               </div>
             </div>
 
@@ -249,15 +262,15 @@ export function UploadPage() {
             <div className="grid grid-cols-3 gap-4 mb-5">
               <div className="bg-zinc-900 rounded-lg p-4">
                 <p className="text-xs text-zinc-500 mb-1">Iteration</p>
-                <p className="text-xl font-semibold text-zinc-200">4 / {iterations}</p>
+                <p className="text-xl font-semibold text-zinc-200">{progress?.iteration ?? 0} / {progress?.totalIterations ?? iterations}</p>
               </div>
               <div className="bg-zinc-900 rounded-lg p-4">
                 <p className="text-xs text-zinc-500 mb-1">Elapsed</p>
-                <p className="text-xl font-semibold text-zinc-200">1:23</p>
+                <p className="text-xl font-semibold text-zinc-200">{formatTime(progress?.elapsedSeconds ?? 0)}</p>
               </div>
               <div className="bg-zinc-900 rounded-lg p-4">
                 <p className="text-xs text-zinc-500 mb-1">ETA</p>
-                <p className="text-xl font-semibold text-zinc-200">~1:47</p>
+                <p className="text-xl font-semibold text-zinc-200">~{formatTime(progress?.etaSeconds ?? 0)}</p>
               </div>
             </div>
 
@@ -265,7 +278,7 @@ export function UploadPage() {
             <div className="bg-zinc-900 rounded-lg p-4 mb-5">
               <div className="flex justify-between items-center mb-3">
                 <p className="text-sm text-zinc-400">Best Energy</p>
-                <p className="text-lg font-semibold text-green-400">2.45</p>
+                <p className="text-lg font-semibold text-green-400">{progress?.bestEnergy?.toFixed(2) ?? "—"}</p>
               </div>
               {/* Mini Convergence Chart with gradient colors */}
               <div className="h-20 flex items-end gap-1">
@@ -368,15 +381,15 @@ export function UploadPage() {
               <div className="grid grid-cols-3 gap-3">
                 <div className="bg-zinc-900 rounded-lg p-4 transform transition-all hover:scale-[1.02]" style={{ animationDelay: "100ms" }}>
                   <p className="text-xs text-red-400 mb-1 font-medium">X Axis</p>
-                  <p className="text-xl font-mono font-semibold text-zinc-200">+3.2 <span className="text-xs text-zinc-500">cm</span></p>
+                  <p className="text-xl font-mono font-semibold text-zinc-200">{result?.action[0]?.toFixed(1) ?? "0.0"} <span className="text-xs text-zinc-500">cm</span></p>
                 </div>
                 <div className="bg-zinc-900 rounded-lg p-4 transform transition-all hover:scale-[1.02]" style={{ animationDelay: "200ms" }}>
                   <p className="text-xs text-green-400 mb-1 font-medium">Y Axis</p>
-                  <p className="text-xl font-mono font-semibold text-zinc-200">-1.5 <span className="text-xs text-zinc-500">cm</span></p>
+                  <p className="text-xl font-mono font-semibold text-zinc-200">{result?.action[1]?.toFixed(1) ?? "0.0"} <span className="text-xs text-zinc-500">cm</span></p>
                 </div>
                 <div className="bg-zinc-900 rounded-lg p-4 transform transition-all hover:scale-[1.02]" style={{ animationDelay: "300ms" }}>
                   <p className="text-xs text-blue-400 mb-1 font-medium">Z Axis</p>
-                  <p className="text-xl font-mono font-semibold text-zinc-200">+0.8 <span className="text-xs text-zinc-500">cm</span></p>
+                  <p className="text-xl font-mono font-semibold text-zinc-200">{result?.action[2]?.toFixed(1) ?? "0.0"} <span className="text-xs text-zinc-500">cm</span></p>
                 </div>
               </div>
 
@@ -385,12 +398,12 @@ export function UploadPage() {
                 <div className="flex justify-between items-center mb-2">
                   <span className="text-sm text-zinc-400">Confidence</span>
                   <span className="text-base font-semibold text-green-400 flex items-center gap-1">
-                    82%
+                    {Math.round((result?.confidence ?? 0) * 100)}%
                     <CheckCircleIcon />
                   </span>
                 </div>
                 <div className="h-2.5 bg-zinc-700 rounded-full overflow-hidden">
-                  <div className="h-full bg-gradient-to-r from-green-600 to-green-400 rounded-full transition-all duration-1000" style={{ width: "82%" }} />
+                  <div className="h-full bg-gradient-to-r from-green-600 to-green-400 rounded-full transition-all duration-1000" style={{ width: `${(result?.confidence ?? 0) * 100}%` }} />
                 </div>
               </div>
 
@@ -398,11 +411,11 @@ export function UploadPage() {
               <div className="flex gap-4">
                 <div className="bg-zinc-900 rounded-lg px-4 py-3">
                   <span className="text-xs text-zinc-500">Energy: </span>
-                  <span className="text-base font-semibold text-zinc-200">1.23</span>
+                  <span className="text-base font-semibold text-zinc-200">{result?.energy?.toFixed(2) ?? "—"}</span>
                 </div>
                 <div className="bg-zinc-900 rounded-lg px-4 py-3">
-                  <span className="text-xs text-zinc-500">Time: </span>
-                  <span className="text-base font-semibold text-zinc-200">3.4s</span>
+                  <span className="text-xs text-zinc-500">Iterations: </span>
+                  <span className="text-base font-semibold text-zinc-200">{result?.energyHistory?.length ?? iterations}</span>
                 </div>
               </div>
 
@@ -426,7 +439,7 @@ export function UploadPage() {
             {/* Energy Landscape Visualization */}
             <div className="w-full lg:w-[340px] shrink-0">
               <EnergyLandscape
-                optimalAction={[3.2, -1.5, 0.8]}
+                optimalAction={result?.action ?? [0, 0, 0]}
                 onActionSelect={(action, energy) => {
                   console.log("Selected action:", action, "Energy:", energy);
                 }}

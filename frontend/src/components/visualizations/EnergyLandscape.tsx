@@ -58,6 +58,7 @@ export function EnergyLandscape({ optimalAction, onActionSelect }: EnergyLandsca
   const [slicePlane, setSlicePlane] = useState<"XY" | "XZ" | "YZ">("XY");
   const [fixedValue, setFixedValue] = useState(optimalAction[2]);
   const [hoveredPoint, setHoveredPoint] = useState<{ x: number; y: number; energy: number } | null>(null);
+  const [mousePos, setMousePos] = useState<{ svgX: number; svgY: number } | null>(null);
   const [selectedPoint, setSelectedPoint] = useState<{ x: number; y: number; energy: number } | null>(null);
   const [showGradients, setShowGradients] = useState(false);
   const [showOptimalMarker, setShowOptimalMarker] = useState(true);
@@ -139,6 +140,26 @@ export function EnergyLandscape({ optimalAction, onActionSelect }: EnergyLandsca
     y: toSvgY(y, RANGE, SVG_SIZE),
   }), [RANGE, SVG_SIZE]);
 
+  // Convert SVG coordinates to data coordinates
+  const svgToData = useCallback((svgX: number, svgY: number) => ({
+    x: (svgX / SVG_SIZE) * (RANGE * 2) - RANGE,
+    y: ((SVG_SIZE - svgY) / SVG_SIZE) * (RANGE * 2) - RANGE,
+  }), [SVG_SIZE, RANGE]);
+
+  // Handle mouse move on the SVG to track actual cursor position
+  const handleMouseMove = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const svgX = e.clientX - rect.left;
+    const svgY = e.clientY - rect.top;
+    setMousePos({ svgX, svgY });
+  }, []);
+
+  const handleMouseLeave = useCallback(() => {
+    setMousePos(null);
+    setHoveredPoint(null);
+  }, []);
+
   return (
     <div className="bg-zinc-900 rounded-xl border border-zinc-700 p-4">
       {/* Header */}
@@ -188,7 +209,13 @@ export function EnergyLandscape({ optimalAction, onActionSelect }: EnergyLandsca
               style={{ touchAction: 'none' }}
             >
               {/* Grid cells */}
-              <svg width="280" height="280" className="absolute inset-0">
+              <svg
+                width="280"
+                height="280"
+                className="absolute inset-0"
+                onMouseMove={handleMouseMove}
+                onMouseLeave={handleMouseLeave}
+              >
                 {energyData.map((point, i) => {
                   const row = Math.floor(i / gridSize);
                   const col = i % gridSize;
@@ -211,13 +238,13 @@ export function EnergyLandscape({ optimalAction, onActionSelect }: EnergyLandsca
                   );
                 })}
 
-                {/* Crosshairs on hover for precise selection */}
-                {hoveredPoint && (
+                {/* Crosshairs on hover for precise selection - follows actual mouse position */}
+                {mousePos && (
                   <>
                     <line
-                      x1={((hoveredPoint.x + 7.5) / 15) * 280}
+                      x1={mousePos.svgX}
                       y1="0"
-                      x2={((hoveredPoint.x + 7.5) / 15) * 280}
+                      x2={mousePos.svgX}
                       y2="280"
                       stroke="rgba(255,255,255,0.3)"
                       strokeWidth="1"
@@ -225,17 +252,17 @@ export function EnergyLandscape({ optimalAction, onActionSelect }: EnergyLandsca
                     />
                     <line
                       x1="0"
-                      y1={280 - ((hoveredPoint.y + 7.5) / 15) * 280}
+                      y1={mousePos.svgY}
                       x2="280"
-                      y2={280 - ((hoveredPoint.y + 7.5) / 15) * 280}
+                      y2={mousePos.svgY}
                       stroke="rgba(255,255,255,0.3)"
                       strokeWidth="1"
                       strokeDasharray="4,4"
                     />
                     {/* Preview dot at cursor */}
                     <circle
-                      cx={((hoveredPoint.x + 7.5) / 15) * 280}
-                      cy={280 - ((hoveredPoint.y + 7.5) / 15) * 280}
+                      cx={mousePos.svgX}
+                      cy={mousePos.svgY}
                       r="6"
                       fill="rgba(168, 85, 247, 0.5)"
                       stroke="#a855f7"
@@ -371,20 +398,27 @@ export function EnergyLandscape({ optimalAction, onActionSelect }: EnergyLandsca
                 })}
               </svg>
 
-              {/* Hover tooltip */}
-              {hoveredPoint && (
-                <div
-                  className="absolute z-10 px-2 py-1 bg-zinc-950 text-xs text-white rounded shadow-lg pointer-events-none"
-                  style={{
-                    left: ((hoveredPoint.x + 7.5) / 15) * 280 + 10,
-                    top: 280 - ((hoveredPoint.y + 7.5) / 15) * 280 - 30,
-                  }}
-                >
-                  [{hoveredPoint.x.toFixed(1)}, {hoveredPoint.y.toFixed(1)}]
-                  <br />
-                  Energy: {hoveredPoint.energy.toFixed(2)}
-                </div>
-              )}
+              {/* Hover tooltip - shows actual mouse position coordinates and cell energy */}
+              {mousePos && (() => {
+                const dataCoords = svgToData(mousePos.svgX, mousePos.svgY);
+                return (
+                  <div
+                    className="absolute z-10 px-2 py-1 bg-zinc-950 text-xs text-white rounded shadow-lg pointer-events-none"
+                    style={{
+                      left: Math.min(mousePos.svgX + 10, 200),
+                      top: Math.max(mousePos.svgY - 40, 5),
+                    }}
+                  >
+                    [{dataCoords.x.toFixed(1)}, {dataCoords.y.toFixed(1)}]
+                    {hoveredPoint && (
+                      <>
+                        <br />
+                        Energy: {hoveredPoint.energy.toFixed(2)}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* X-axis label */}

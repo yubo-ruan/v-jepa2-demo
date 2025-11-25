@@ -1,11 +1,15 @@
 """Dummy model download service with progress simulation."""
 
 import asyncio
+import logging
+import random
 import uuid
-from typing import Dict, Callable, Optional
+from typing import Dict, Callable, Optional, Awaitable, Any
 from dataclasses import dataclass
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -71,26 +75,27 @@ class DummyDownloadService:
     async def run_download(
         self,
         task_id: str,
-        progress_callback: Optional[Callable] = None,
-    ):
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> None:
         """Simulate download with realistic speed variations."""
         task = self.tasks.get(task_id)
         if not task:
             raise ValueError(f"Task {task_id} not found")
 
+        logger.info(f"Starting download for task {task_id}, model: {task.model_id}")
         task.status = "downloading"
         total = task.total_size_mb
 
         # Simulate varying download speeds (20-100 MB/s)
-        base_speed = 50  # MB/s
+        base_speed = settings.dummy_download_speed_mbps
 
         while task.downloaded_mb < total:
             if task.cancelled:
                 task.status = "cancelled"
+                logger.info(f"Download cancelled for task {task_id}")
                 return
 
             # Vary speed with some randomness
-            import random
             speed = base_speed * random.uniform(0.4, 2.0)
 
             # Calculate chunk (simulate ~100ms update interval)
@@ -114,6 +119,7 @@ class DummyDownloadService:
 
         task.status = "completed"
         self.cached_models[task.model_id] = True
+        logger.info(f"Download completed for task {task_id}, model: {task.model_id}")
 
         if progress_callback:
             await progress_callback({

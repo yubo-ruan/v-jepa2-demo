@@ -2,9 +2,11 @@
 
 import random
 import time
-from typing import Dict, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Dict, List
+
+from app.config import settings
 
 
 @dataclass
@@ -50,20 +52,20 @@ class DummyMetricsService:
         base_cpu = 50 if self._is_processing else 15
         cpu = base_cpu + random.uniform(-10, 15)
 
-        # Memory
-        memory_total = 64.0  # GB
+        # Memory (from config)
+        memory_total = settings.system_memory_total_gb
         base_memory = 24.0 if self._is_processing else 12.0
         memory_used = base_memory + random.uniform(-2, 4)
 
-        # Disk
-        disk_total = 1000.0  # GB
+        # Disk (from config)
+        disk_total = settings.system_disk_total_gb
         disk_used = 450 + random.uniform(-5, 5)
 
-        # GPU metrics
+        # GPU metrics (from config)
         gpu_util = self._base_gpu_util + random.uniform(-5, 10)
         gpu_util = max(0, min(100, gpu_util))
 
-        gpu_memory_total = 24576  # 24GB VRAM
+        gpu_memory_total = settings.gpu_memory_total_mb
         base_gpu_memory = 18000 if self._is_processing else 2000
         gpu_memory_used = base_gpu_memory + random.uniform(-500, 1000)
 

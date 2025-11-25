@@ -1,8 +1,11 @@
 """WebSocket connection manager for real-time updates."""
 
-from typing import Dict, List
+import logging
+from typing import Dict, List, Any
+
 from fastapi import WebSocket
-import json
+
+logger = logging.getLogger(__name__)
 
 
 class WebSocketManager:
@@ -27,19 +30,30 @@ class WebSocketManager:
             if not self.connections[task_id]:
                 del self.connections[task_id]
 
-    async def send_message(self, task_id: str, message: dict):
-        """Send a message to all connections for a task."""
-        if task_id in self.connections:
-            disconnected = []
-            for websocket in self.connections[task_id]:
-                try:
-                    await websocket.send_json(message)
-                except Exception:
-                    disconnected.append(websocket)
+    async def send_message(self, task_id: str, message: Dict[str, Any]) -> int:
+        """Send a message to all connections for a task.
 
-            # Clean up disconnected sockets
-            for ws in disconnected:
-                self.disconnect(task_id, ws)
+        Returns the number of successful sends.
+        """
+        if task_id not in self.connections:
+            return 0
+
+        disconnected = []
+        success_count = 0
+
+        for websocket in self.connections[task_id]:
+            try:
+                await websocket.send_json(message)
+                success_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to send WebSocket message for task {task_id}: {e}")
+                disconnected.append(websocket)
+
+        # Clean up disconnected sockets
+        for ws in disconnected:
+            self.disconnect(task_id, ws)
+
+        return success_count
 
     async def broadcast_progress(self, task_id: str, progress: dict):
         """Broadcast progress update."""

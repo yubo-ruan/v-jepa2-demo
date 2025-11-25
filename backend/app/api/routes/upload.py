@@ -1,13 +1,18 @@
 """Image upload API routes (dummy implementation)."""
 
-import uuid
-import os
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from PIL import Image
 import io
+import logging
+import uuid
+from typing import Dict, Any
+
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi.responses import Response
+from PIL import Image
 
 from app.models.schemas import UploadResponse
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
@@ -34,9 +39,13 @@ async def upload_image(file: UploadFile = File(...)):
     # Read file content
     content = await file.read()
 
-    # Check file size (10MB max)
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large. Max size: 10MB")
+    # Check file size
+    max_size = settings.max_upload_size_mb * 1024 * 1024
+    if len(content) > max_size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large. Max size: {settings.max_upload_size_mb}MB"
+        )
 
     # Get image dimensions
     try:
@@ -72,8 +81,6 @@ async def get_upload(upload_id: str):
         raise HTTPException(status_code=404, detail="Upload not found")
 
     upload = _uploads[upload_id]
-    from fastapi.responses import Response
-
     return Response(
         content=upload["content"],
         media_type=upload["content_type"],

@@ -22,6 +22,18 @@ class Settings(BaseSettings):
     # Dummy mode settings
     dummy_mode: bool = True
     dummy_iteration_delay: float = 0.5  # seconds between iterations
+    dummy_download_speed_mbps: float = 50.0  # base download speed simulation
+
+    # Upload settings
+    max_upload_size_mb: int = 10
+
+    # Batch processing
+    batch_task_timeout_seconds: int = 300
+
+    # System metrics (simulated)
+    system_memory_total_gb: float = 64.0
+    system_disk_total_gb: float = 1000.0
+    gpu_memory_total_mb: float = 24576.0
 
     # Model defaults
     default_model: str = "vit-giant"

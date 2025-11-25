@@ -1,5 +1,8 @@
 """FastAPI application entry point."""
 
+import logging
+import sys
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,6 +11,18 @@ from app.api.routes import planning, models, experiments, upload, health, system
 from app.api.websocket import ws_manager
 from app.services.dummy_planner import dummy_planner
 from app.services.dummy_download import dummy_download
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO if not settings.debug else logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+
+# Reduce noise from uvicorn access logs
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 
 # Create FastAPI app
 app = FastAPI(
@@ -36,6 +51,13 @@ app.include_router(upload.router, prefix="/api")
 app.include_router(system.router, prefix="/api")
 app.include_router(export.router, prefix="/api")
 app.include_router(batch.router, prefix="/api")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Log startup information."""
+    logger.info(f"Starting V-JEPA2 API server (mode: {'dummy' if settings.dummy_mode else 'production'})")
+    logger.info(f"CORS origins: {settings.cors_origins}")
 
 
 # WebSocket endpoint for planning progress

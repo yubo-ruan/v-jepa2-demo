@@ -1,14 +1,19 @@
 """Batch planning API routes."""
 
 import asyncio
+import logging
 import uuid
+from datetime import datetime
 from typing import Dict, List, Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from datetime import datetime
 
-from app.services.dummy_planner import dummy_planner, PlanningTask
+from app.config import settings
 from app.models.schemas import PlanningRequest, ActionResult
+from app.services.dummy_planner import dummy_planner, PlanningTask
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/batch", tags=["batch"])
 
@@ -128,30 +133,43 @@ async def _run_batch(batch_id: str, parallel: bool, max_concurrent: int):
         batch.status = "partial"
 
 
-async def _run_single_task(batch_id: str, task_id: str, index: int):
-    """Run a single task within a batch."""
+async def _run_single_task(batch_id: str, task_id: str, index: int) -> None:
+    """Run a single task within a batch with timeout."""
     batch = _batches.get(batch_id)
     if not batch or index >= len(batch.tasks):
         return
 
     task_status = batch.tasks[index]
     task_status.status = "running"
+    timeout = settings.batch_task_timeout_seconds
 
     try:
         # Progress callback
         async def on_progress(progress):
             task_status.progress_percent = (progress.iteration / progress.total_iterations) * 100
 
-        result = await dummy_planner.run_planning(task_id, on_progress)
+        # Run with timeout
+        result = await asyncio.wait_for(
+            dummy_planner.run_planning(task_id, on_progress),
+            timeout=timeout
+        )
         task_status.status = "completed"
         task_status.result = result
         task_status.progress_percent = 100
         batch.completed_tasks += 1
+        logger.info(f"Batch task {task_id} completed successfully")
+
+    except asyncio.TimeoutError:
+        task_status.status = "failed"
+        task_status.error = f"Task timed out after {timeout} seconds"
+        batch.failed_tasks += 1
+        logger.warning(f"Batch task {task_id} timed out after {timeout}s")
 
     except Exception as e:
         task_status.status = "failed"
         task_status.error = str(e)
         batch.failed_tasks += 1
+        logger.error(f"Batch task {task_id} failed: {e}")
 
 
 @router.get("/{batch_id}", response_model=BatchStatus)

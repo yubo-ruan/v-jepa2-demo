@@ -1,12 +1,16 @@
 """Model management API routes with download simulation."""
 
 import asyncio
+import logging
+from typing import Dict, Any
+
 from fastapi import APIRouter, HTTPException
-from typing import List, Dict
 
 from app.models.schemas import ModelInfo, ModelsResponse
 from app.services.dummy_download import dummy_download
 from app.api.websocket import ws_manager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["models"])
 
@@ -164,10 +168,10 @@ async def download_model(model_id: str):
     }
 
 
-async def _run_download_with_ws(task_id: str):
+async def _run_download_with_ws(task_id: str) -> None:
     """Run download and broadcast progress via WebSocket."""
 
-    async def progress_callback(progress: dict):
+    async def progress_callback(progress: Dict[str, Any]) -> None:
         await ws_manager.send_message(task_id, {
             "type": "progress",
             "data": progress,
@@ -179,7 +183,14 @@ async def _run_download_with_ws(task_id: str):
             "type": "completed",
             "data": {"message": "Download complete"},
         })
+    except asyncio.CancelledError:
+        logger.info(f"Download task {task_id} was cancelled")
+        await ws_manager.send_message(task_id, {
+            "type": "cancelled",
+            "data": {"message": "Download cancelled"},
+        })
     except Exception as e:
+        logger.error(f"Download task {task_id} failed: {e}")
         await ws_manager.send_message(task_id, {
             "type": "error",
             "data": {"message": str(e)},

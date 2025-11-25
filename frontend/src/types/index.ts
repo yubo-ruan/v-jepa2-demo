@@ -16,6 +16,7 @@ export interface Experiment {
 // Config types
 export interface ModelConfig {
   defaultModel: string;
+  defaultVariant: string;
   defaultPreset: string;
   customSamples: number;
   customIterations: number;

@@ -1,12 +1,39 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { styles } from "@/components/ui";
+import { api } from "@/lib/api";
+
+interface LeaderboardEntry {
+  modelId: string;
+  modelName: string;
+  totalRuns: number;
+  wins: number;
+  winRate: number;
+  avgEnergy: number;
+  avgConfidence: number;
+}
 
 export function ModelComparison() {
   const [modelA, setModelA] = useState("meta-baseline");
   const [modelB, setModelB] = useState("droid-finetune-v1");
   const [hasResults, setHasResults] = useState(true);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [totalComparisons, setTotalComparisons] = useState(0);
+  const [isLoadingLeaderboard, setIsLoadingLeaderboard] = useState(true);
+
+  useEffect(() => {
+    api.getModelLeaderboard()
+      .then((data) => {
+        setLeaderboard(data.leaderboard);
+        setTotalComparisons(data.totalComparisons);
+        setIsLoadingLeaderboard(false);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch leaderboard:", err);
+        setIsLoadingLeaderboard(false);
+      });
+  }, []);
 
   const comparisonResults = {
     metrics: [
@@ -21,9 +48,65 @@ export function ModelComparison() {
 
   return (
     <div className="space-y-6">
+      {/* Leaderboard from API */}
+      <div className={styles.card}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className={styles.cardTitle}>Model Leaderboard</h3>
+          {isLoadingLeaderboard ? (
+            <span className="text-xs text-zinc-500 animate-pulse">Loading...</span>
+          ) : (
+            <span className="flex items-center gap-1 text-xs text-green-400">
+              <span className="w-2 h-2 rounded-full bg-green-500" />
+              {totalComparisons} comparisons from API
+            </span>
+          )}
+        </div>
+
+        {leaderboard.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-zinc-500 border-b border-zinc-700">
+                  <th className="pb-2 pl-2">#</th>
+                  <th className="pb-2">Model</th>
+                  <th className="pb-2">Wins</th>
+                  <th className="pb-2">Win Rate</th>
+                  <th className="pb-2">Avg Energy</th>
+                  <th className="pb-2">Avg Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {leaderboard.map((entry, idx) => (
+                  <tr key={entry.modelId} className="border-b border-zinc-800 hover:bg-zinc-800/50">
+                    <td className="py-3 pl-2 text-zinc-500">{idx + 1}</td>
+                    <td className="py-3">
+                      <span className="text-zinc-200 font-medium">{entry.modelName}</span>
+                      {idx === 0 && <span className="ml-2 text-yellow-400">👑</span>}
+                    </td>
+                    <td className="py-3 text-zinc-400">{entry.wins}/{entry.totalRuns}</td>
+                    <td className="py-3">
+                      <span className={`font-medium ${entry.winRate > 0.5 ? "text-green-400" : "text-zinc-400"}`}>
+                        {(entry.winRate * 100).toFixed(1)}%
+                      </span>
+                    </td>
+                    <td className="py-3 text-amber-400">{entry.avgEnergy.toFixed(3)}</td>
+                    <td className="py-3 text-indigo-400">{(entry.avgConfidence * 100).toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-center py-8 text-zinc-500">
+            <p className="text-sm">No comparison data yet</p>
+            <p className="text-xs mt-1">Run comparisons to populate the leaderboard</p>
+          </div>
+        )}
+      </div>
+
       {/* Model Selection */}
       <div className={styles.card}>
-        <h3 className={styles.cardTitle}>Model Comparison</h3>
+        <h3 className={styles.cardTitle}>Run New Comparison</h3>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
           <div>

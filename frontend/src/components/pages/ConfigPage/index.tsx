@@ -1,13 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { SaveIcon, ResetIcon } from "@/components/icons";
 import { styles } from "@/components/ui";
 import { useConfig, useToast } from "@/contexts";
-import { configTabs, modelOptions, presetOptions, cachedModelsConfig } from "@/constants";
+import { configTabs, modelVariants as defaultVariants, presetOptions, cachedModelsConfig } from "@/constants";
+import { api, type ModelVariant } from "@/lib/api";
 
 export function ConfigPage() {
   const [configTab, setConfigTab] = useState<"model" | "ui" | "advanced">("model");
+  const [modelVariants, setModelVariants] = useState<ModelVariant[]>([]);
+  const [isLoadingVariants, setIsLoadingVariants] = useState(true);
   const {
     modelConfig,
     uiConfig,
@@ -22,10 +25,36 @@ export function ConfigPage() {
   } = useConfig();
   const { showToast } = useToast();
 
+  // Fetch model variants from backend API
+  useEffect(() => {
+    api.getModelVariants()
+      .then((variants) => {
+        setModelVariants(variants);
+        setIsLoadingVariants(false);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch model variants:", err);
+        // Fall back to default variants
+        setModelVariants(defaultVariants.map(v => ({
+          id: v.id,
+          name: v.name,
+          description: v.description,
+          baseModel: v.baseModel,
+          baseModelName: v.baseModelName,
+          isRecommended: v.isRecommended,
+        })));
+        setIsLoadingVariants(false);
+      });
+  }, []);
+
   const handleSave = () => {
     saveConfig();
     showToast("Settings saved successfully", "success");
   };
+
+  // Get selected variant info
+  const selectedVariant = modelVariants.find(v => v.id === (modelConfig.defaultVariant || "droid-finetune-v1"))
+    || modelVariants[0];
 
   return (
     <>
@@ -70,35 +99,80 @@ export function ConfigPage() {
       {/* Model Preferences Tab */}
       {configTab === "model" && (
         <div className="space-y-6">
-          {/* Default Model Settings */}
+          {/* Model Selection */}
           <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
-            <h3 className="text-base font-semibold text-zinc-300 mb-5">Default Model Settings</h3>
+            <h3 className="text-base font-semibold text-zinc-300 mb-5">
+              Model Selection
+              {isLoadingVariants && <span className="ml-2 text-xs text-zinc-500">(loading from API...)</span>}
+            </h3>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="space-y-4">
               <div>
-                <label className="block text-sm text-zinc-400 mb-2">Default Model</label>
+                <label className="block text-sm text-zinc-400 mb-2">Model</label>
                 <select
-                  value={modelConfig.defaultModel}
-                  onChange={(e) => updateModelConfig({ defaultModel: e.target.value })}
+                  value={modelConfig.defaultVariant || "droid-finetune-v1"}
+                  onChange={(e) => {
+                    const variant = modelVariants.find(v => v.id === e.target.value);
+                    updateModelConfig({
+                      defaultVariant: e.target.value,
+                      defaultModel: variant?.baseModel || "vit-giant"
+                    });
+                  }}
                   className={styles.input}
+                  disabled={isLoadingVariants}
                 >
-                  {modelOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
+                  {modelVariants.length > 0 ? (
+                    modelVariants.map((variant) => (
+                      <option key={variant.id} value={variant.id}>
+                        {variant.name} {variant.isRecommended && "⭐"}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="droid-finetune-v1">Loading...</option>
+                  )}
                 </select>
               </div>
-              <div>
-                <label className="block text-sm text-zinc-400 mb-2">Default Preset</label>
-                <select
-                  value={modelConfig.defaultPreset}
-                  onChange={(e) => updateModelConfig({ defaultPreset: e.target.value })}
-                  className={styles.input}
-                >
-                  {presetOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
+
+              {/* Show base model info */}
+              <div className="bg-zinc-900 rounded-lg p-3">
+                <span className="text-sm text-zinc-400">Using: </span>
+                <span className="text-sm text-zinc-200 font-medium">
+                  {selectedVariant?.baseModelName || "V-JEPA 2-AC ViT-Giant"}
+                </span>
               </div>
+
+              {/* Variant description */}
+              <p className="text-xs text-zinc-500">
+                {selectedVariant?.description || "Loading model information..."}
+              </p>
+
+              {/* API status indicator */}
+              <div className="flex items-center gap-2 text-xs">
+                <span className={`w-2 h-2 rounded-full ${modelVariants.length > 0 ? "bg-green-500" : "bg-yellow-500"}`} />
+                <span className="text-zinc-500">
+                  {modelVariants.length > 0
+                    ? `${modelVariants.length} variants loaded from API`
+                    : "Connecting to backend..."}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Default Preset Settings */}
+          <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
+            <h3 className="text-base font-semibold text-zinc-300 mb-5">Default Preset</h3>
+
+            <div>
+              <label className="block text-sm text-zinc-400 mb-2">Preset</label>
+              <select
+                value={modelConfig.defaultPreset}
+                onChange={(e) => updateModelConfig({ defaultPreset: e.target.value })}
+                className={styles.input}
+              >
+                {presetOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
             </div>
           </div>
 

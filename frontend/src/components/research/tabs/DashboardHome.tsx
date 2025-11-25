@@ -1,6 +1,8 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { styles } from "@/components/ui";
+import { api } from "@/lib/api";
 import {
   ResearchTab,
   quickActions,
@@ -10,11 +12,50 @@ import {
   datasetsSummary,
 } from "../types";
 
+interface UsageSummary {
+  totalPlans: number;
+  totalExperiments: number;
+  avgPlanningTimeSeconds: number;
+  avgConfidence: number;
+  avgEnergy: number;
+  modelsUsed: Record<string, number>;
+}
+
+interface ModelPerformance {
+  modelId: string;
+  modelName: string;
+  totalInferences: number;
+  avgInferenceTimeMs: number;
+  avgEnergy: number;
+  avgConfidence: number;
+  successRate: number;
+}
+
 interface DashboardHomeProps {
   onNavigate: (tab: ResearchTab) => void;
 }
 
 export function DashboardHome({ onNavigate }: DashboardHomeProps) {
+  const [analytics, setAnalytics] = useState<UsageSummary | null>(null);
+  const [modelPerformance, setModelPerformance] = useState<ModelPerformance[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    Promise.all([
+      api.getUsageSummary(30),
+      api.getModelPerformance(),
+    ])
+      .then(([summary, performance]) => {
+        setAnalytics(summary);
+        setModelPerformance(performance);
+        setIsLoading(false);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch analytics:", err);
+        setIsLoading(false);
+      });
+  }, []);
+
   return (
     <div className="space-y-6">
       {/* Quick Actions */}
@@ -32,6 +73,83 @@ export function DashboardHome({ onNavigate }: DashboardHomeProps) {
           </button>
         ))}
       </div>
+
+      {/* Analytics Summary from API */}
+      <div className={styles.card}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className={styles.cardTitle}>Usage Analytics (Last 30 Days)</h3>
+          {isLoading && (
+            <span className="text-xs text-zinc-500 animate-pulse">Loading from API...</span>
+          )}
+          {!isLoading && analytics && (
+            <span className="flex items-center gap-1 text-xs text-green-400">
+              <span className="w-2 h-2 rounded-full bg-green-500" />
+              Live from API
+            </span>
+          )}
+        </div>
+
+        {analytics ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-zinc-900 rounded-lg p-4">
+              <p className="text-2xl font-semibold text-zinc-200">{analytics.totalPlans}</p>
+              <p className="text-xs text-zinc-500">Total Plans</p>
+            </div>
+            <div className="bg-zinc-900 rounded-lg p-4">
+              <p className="text-2xl font-semibold text-zinc-200">{analytics.totalExperiments}</p>
+              <p className="text-xs text-zinc-500">Experiments</p>
+            </div>
+            <div className="bg-zinc-900 rounded-lg p-4">
+              <p className="text-2xl font-semibold text-indigo-400">{(analytics.avgConfidence * 100).toFixed(1)}%</p>
+              <p className="text-xs text-zinc-500">Avg Confidence</p>
+            </div>
+            <div className="bg-zinc-900 rounded-lg p-4">
+              <p className="text-2xl font-semibold text-amber-400">{analytics.avgPlanningTimeSeconds.toFixed(1)}s</p>
+              <p className="text-xs text-zinc-500">Avg Planning Time</p>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[1, 2, 3, 4].map((i) => (
+              <div key={i} className="bg-zinc-900 rounded-lg p-4 animate-pulse">
+                <div className="h-8 bg-zinc-800 rounded mb-2" />
+                <div className="h-3 bg-zinc-800 rounded w-20" />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Model Performance from API */}
+      {modelPerformance.length > 0 && (
+        <div className={styles.card}>
+          <h3 className={styles.cardTitle}>Model Performance (from API)</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-zinc-500 border-b border-zinc-700">
+                  <th className="pb-2">Model</th>
+                  <th className="pb-2">Inferences</th>
+                  <th className="pb-2">Avg Time</th>
+                  <th className="pb-2">Avg Confidence</th>
+                  <th className="pb-2">Success Rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {modelPerformance.map((model) => (
+                  <tr key={model.modelId} className="border-b border-zinc-800">
+                    <td className="py-2 text-zinc-200 font-medium">{model.modelName}</td>
+                    <td className="py-2 text-zinc-400">{model.totalInferences}</td>
+                    <td className="py-2 text-zinc-400">{model.avgInferenceTimeMs.toFixed(0)}ms</td>
+                    <td className="py-2 text-indigo-400">{(model.avgConfidence * 100).toFixed(1)}%</td>
+                    <td className="py-2 text-green-400">{(model.successRate * 100).toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Active Training */}
       <div className={styles.card}>

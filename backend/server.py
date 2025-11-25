@@ -269,38 +269,14 @@ async def list_models():
                 "resolution": 384,
                 "description": "High-resolution variant"
             },
-            # Action-Conditioned Models
-            {
-                "id": "vjepa2_ac_vit_large",
-                "name": "V-JEPA2 AC ViT-Large",
-                "type": "action_conditioned",
-                "params": "300M",
-                "resolution": 256,
-                "description": "Action-conditioned prediction (PyTorch Hub)"
-            },
-            {
-                "id": "vjepa2_ac_vit_huge",
-                "name": "V-JEPA2 AC ViT-Huge",
-                "type": "action_conditioned",
-                "params": "600M",
-                "resolution": 256,
-                "description": "Medium AC model (PyTorch Hub)"
-            },
+            # Action-Conditioned Models (only confirmed available)
             {
                 "id": "vjepa2_ac_vit_giant",
-                "name": "V-JEPA2 AC ViT-Giant ✓",
+                "name": "V-JEPA2 AC ViT-Giant",
                 "type": "action_conditioned",
                 "params": "1B",
                 "resolution": 256,
-                "description": "Confirmed available (PyTorch Hub)"
-            },
-            {
-                "id": "vjepa2_ac_vit_giant_384",
-                "name": "V-JEPA2 AC ViT-Giant 384",
-                "type": "action_conditioned",
-                "params": "1B",
-                "resolution": 384,
-                "description": "High-res AC model (PyTorch Hub)"
+                "description": "Action-conditioned model with encoder + predictor (PyTorch Hub)"
             }
         ]
     }

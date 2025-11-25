@@ -30,12 +30,40 @@ export const configTabs = [
 
 export type ConfigTabId = typeof configTabs[number]["id"];
 
-// Model dropdown options
+// Model dropdown options (base models)
 export const modelOptions = [
   { value: "vit-large", label: "ViT-Large (fastest, 300M params)" },
   { value: "vit-huge", label: "ViT-Huge (balanced, 600M params)" },
   { value: "vit-giant", label: "ViT-Giant (best quality, 1.2B params) ⭐" },
   { value: "vit-giant-384", label: "ViT-Giant 384 (highest resolution, 1.2B params)" },
+] as const;
+
+// Model variants (fine-tuned versions)
+export const modelVariants = [
+  {
+    id: "meta-baseline",
+    name: "Meta Baseline",
+    description: "Original V-JEPA 2-AC model from Meta",
+    baseModel: "vit-giant",
+    baseModelName: "V-JEPA 2-AC ViT-Giant",
+    isRecommended: false,
+  },
+  {
+    id: "droid-finetune-v1",
+    name: "DROID-finetune-v1",
+    description: "Fine-tuned on DROID dataset",
+    baseModel: "vit-giant",
+    baseModelName: "V-JEPA 2-AC ViT-Giant",
+    isRecommended: true,
+  },
+  {
+    id: "droid-finetune-v2",
+    name: "DROID-finetune-v2",
+    description: "Latest DROID fine-tune with improved robustness",
+    baseModel: "vit-giant",
+    baseModelName: "V-JEPA 2-AC ViT-Giant",
+    isRecommended: false,
+  },
 ] as const;
 
 // Preset dropdown options (for config page)
@@ -112,6 +140,7 @@ export const sampleExperiments: Experiment[] = [
 // Default values for state initialization
 export const defaultModelConfig = {
   defaultModel: "vit-giant",
+  defaultVariant: "droid-finetune-v1",
   defaultPreset: "balanced",
   customSamples: 600,
   customIterations: 12,

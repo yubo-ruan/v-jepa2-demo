@@ -14,10 +14,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["models"])
 
-# Model registry with details
+# Model variants - DROID fine-tuned models based on V-JEPA 2-AC ViT-Giant
+MODEL_VARIANTS: Dict[str, dict] = {
+    "meta-baseline": {
+        "name": "Meta Baseline",
+        "description": "Original V-JEPA 2-AC model from Meta",
+        "base_model": "vit-giant",
+        "is_recommended": False,
+    },
+    "droid-finetune-v1": {
+        "name": "DROID-finetune-v1",
+        "description": "Fine-tuned on DROID dataset (recommended)",
+        "base_model": "vit-giant",
+        "is_recommended": True,
+    },
+    "droid-finetune-v2": {
+        "name": "DROID-finetune-v2",
+        "description": "Latest DROID fine-tune with improved robustness",
+        "base_model": "vit-giant",
+        "is_recommended": False,
+    },
+}
+
+# Base model registry with architecture details
 MODEL_REGISTRY: Dict[str, dict] = {
     "vit-giant": {
-        "name": "ViT-Giant",
+        "name": "V-JEPA 2-AC ViT-Giant",
         "params": "1.2B",
         "size_gb": 7.2,
         "description": "Best quality, recommended for production",
@@ -27,7 +49,7 @@ MODEL_REGISTRY: Dict[str, dict] = {
         "heads": 16,
     },
     "vit-huge": {
-        "name": "ViT-Huge",
+        "name": "V-JEPA 2-AC ViT-Huge",
         "params": "600M",
         "size_gb": 4.5,
         "description": "Balanced speed and quality",
@@ -37,7 +59,7 @@ MODEL_REGISTRY: Dict[str, dict] = {
         "heads": 16,
     },
     "vit-large": {
-        "name": "ViT-Large",
+        "name": "V-JEPA 2-AC ViT-Large",
         "params": "300M",
         "size_gb": 2.1,
         "description": "Fastest inference, good for prototyping",
@@ -47,7 +69,7 @@ MODEL_REGISTRY: Dict[str, dict] = {
         "heads": 16,
     },
     "vit-giant-384": {
-        "name": "ViT-Giant 384",
+        "name": "V-JEPA 2-AC ViT-Giant 384",
         "params": "1.2B",
         "size_gb": 7.5,
         "description": "Highest resolution input (384x384)",
@@ -93,6 +115,23 @@ async def list_models():
     """List all available models and their cache status."""
     models = [_get_model_info(mid) for mid in MODEL_REGISTRY.keys()]
     return ModelsResponse(models=models)
+
+
+@router.get("/variants")
+async def list_model_variants():
+    """List available model variants (fine-tuned versions)."""
+    variants = []
+    for variant_id, variant in MODEL_VARIANTS.items():
+        base_model = MODEL_REGISTRY.get(variant["base_model"], {})
+        variants.append({
+            "id": variant_id,
+            "name": variant["name"],
+            "description": variant["description"],
+            "base_model": variant["base_model"],
+            "base_model_name": base_model.get("name", "Unknown"),
+            "is_recommended": variant["is_recommended"],
+        })
+    return {"variants": variants}
 
 
 @router.get("/{model_id}", response_model=ModelInfo)

@@ -7,7 +7,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api.routes import planning, models, experiments, upload, health, system, export, batch
+from app.api.routes import (
+    planning, models, experiments, upload, health, system, export, batch,
+    video, trajectory, compare, presets, analytics
+)
 from app.api.websocket import ws_manager
 from app.services.dummy_planner import dummy_planner
 from app.services.dummy_download import dummy_download
@@ -51,6 +54,11 @@ app.include_router(upload.router, prefix="/api")
 app.include_router(system.router, prefix="/api")
 app.include_router(export.router, prefix="/api")
 app.include_router(batch.router, prefix="/api")
+app.include_router(video.router, prefix="/api")
+app.include_router(trajectory.router, prefix="/api")
+app.include_router(compare.router, prefix="/api")
+app.include_router(presets.router, prefix="/api")
+app.include_router(analytics.router, prefix="/api")
 
 
 @app.on_event("startup")

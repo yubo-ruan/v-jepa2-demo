@@ -27,7 +27,7 @@ interface ModelInfo {
   resolution: number;
 }
 
-const API_URL = "http://69.30.85.167:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const statusColors: Record<LoadingStatus, string> = {
   idle: "bg-gray-500",

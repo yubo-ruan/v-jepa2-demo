@@ -15,15 +15,35 @@ V-JEPA2 is a self-supervised learning model that predicts future video frames an
 
 ## Architecture
 
+For a detailed architecture diagram and component breakdown, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+
+### System Overview
+
+```
+┌──────────────────────┐          ┌──────────────────────┐
+│   Frontend (Next.js) │◄────────►│  Backend (FastAPI)   │
+│   Port: 3000         │   HTTP   │  Port: 8000          │
+│                      │   WS     │                      │
+└──────────────────────┘          └──────────────────────┘
+         │                                  │
+         ▼                                  ▼
+┌──────────────────────┐          ┌──────────────────────┐
+│  React Components    │          │  PyTorch + V-JEPA2   │
+│  State Management    │          │  Model Inference     │
+└──────────────────────┘          └──────────────────────┘
+```
+
 ### Frontend (Next.js 16 + React 19)
 - **Port**: 3000
 - **Tech Stack**: TypeScript, Tailwind CSS, React Context API
 - **Features**: Real-time WebSocket integration, model management UI, visualization components
+- **Key Components**: UploadPage, PlanningContext, EnergyLandscape, IterationReplay
 
 ### Backend (FastAPI + PyTorch)
 - **Port**: 8000
 - **Tech Stack**: Python, FastAPI, PyTorch with MPS/CUDA support
 - **Features**: V-JEPA2 inference, WebSocket progress streaming, async task processing
+- **Key Components**: VJEPA2ModelLoader, CEM optimizer, AC predictor
 
 ### Supported Models
 

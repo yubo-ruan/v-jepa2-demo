@@ -28,6 +28,8 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+package-lock.json
+frontend/package-lock.json
 
 # Environment
 .env
@@ -61,6 +63,7 @@ build/
 backend/data/models/checkpoints/*.pt
 backend/data/models/checkpoints/*.tmp
 backend/data/models/checkpoints/*.meta.json
+data/models/checkpoints/*
 
 # Logs
 *.log

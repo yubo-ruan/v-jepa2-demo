@@ -5,7 +5,7 @@ import type { Experiment } from "@/types";
 // Preset configurations for planning
 export const planningPresets = [
   { id: "quick" as const, label: "Quick", samples: 100, iterations: 5, tooltip: "100 samples, 5 iter (~1-2 min)", recommended: false },
-  { id: "balanced" as const, label: "Balanced", samples: 400, iterations: 10, tooltip: "400 samples, 10 iter (~3-4 min) - Recommended", recommended: true },
+  { id: "balanced" as const, label: "Balanced", samples: 400, iterations: 10, tooltip: "400 samples, 10 iter (~3-4 min)", recommended: false },
   { id: "quality" as const, label: "Quality", samples: 800, iterations: 15, tooltip: "800 samples, 15 iter (~6-8 min)", recommended: false },
 ] as const;
 
@@ -161,10 +161,8 @@ export const defaultModelConfig = {
 
 export const defaultUIConfig = {
   theme: "dark" as const,
-  showCostEstimates: true,
   showTimeEstimates: true,
   showTooltips: true,
-  compactMode: false,
   distanceUnits: "cm" as const,
 };
 
@@ -175,7 +173,7 @@ export const defaultAdvancedConfig = {
 };
 
 export const defaultPlanningState = {
-  preset: "balanced" as const,
-  samples: 400,
-  iterations: 10,
+  preset: "quick" as const,
+  samples: 100,
+  iterations: 5,
 };

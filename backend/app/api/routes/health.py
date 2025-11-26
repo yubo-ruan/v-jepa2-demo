@@ -29,7 +29,7 @@ async def health_check():
 
     # Get loaded models from model loader
     loader = get_model_loader()
-    models_loaded = [loader.current_model] if loader.is_loaded() else []
+    models_loaded = [loader._loaded_model_id] if loader.is_loaded() else []
 
     return HealthResponse(
         status="healthy",

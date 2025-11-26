@@ -29,10 +29,8 @@ export interface ModelConfig {
 
 export interface UIConfig {
   theme: "dark" | "light" | "auto";
-  showCostEstimates: boolean;
   showTimeEstimates: boolean;
   showTooltips: boolean;
-  compactMode: boolean;
   distanceUnits: "cm" | "m" | "mm";
 }
 

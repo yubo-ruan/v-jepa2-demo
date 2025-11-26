@@ -9,7 +9,7 @@ import { useExportAnimation, type ExportFormat } from "@/hooks";
 interface IterationData {
   iteration: number;
   samples: { x: number; y: number; z: number; energy: number; isElite: boolean }[];
-  mean: [number, number, number];
+  mean: number[]; // 7D action: [x, y, z, roll, pitch, yaw, gripper]
   stdDev: number;
   bestEnergy: number;
   eliteCount: number;
@@ -27,14 +27,15 @@ interface IterationReplayProps {
 // Generate mock iteration data for demo
 function generateMockData(totalIterations: number, totalSamples: number, eliteFraction: number): IterationData[] {
   const data: IterationData[] = [];
-  let mean: [number, number, number] = [0, 0, 0];
+  // 7D action: [x, y, z, roll, pitch, yaw, gripper]
+  let mean: number[] = [0, 0, 0, 0, 0, 0, 0];
   let stdDev = 5;
 
   for (let iter = 0; iter < totalIterations; iter++) {
     const samples: IterationData["samples"] = [];
     const energies: number[] = [];
 
-    // Generate samples from current distribution
+    // Generate samples from current distribution (only position for visualization)
     for (let i = 0; i < totalSamples; i++) {
       const x = mean[0] + (Math.random() - 0.5) * 2 * stdDev;
       const y = mean[1] + (Math.random() - 0.5) * 2 * stdDev;
@@ -65,12 +66,18 @@ function generateMockData(totalIterations: number, totalSamples: number, eliteFr
       s.isElite = eliteIndices.has(i);
     });
 
-    // Calculate new mean from elites
+    // Calculate new mean from elites (7D action)
     const elites = samples.filter(s => s.isElite);
-    const newMean: [number, number, number] = [
+    const newMean: number[] = [
       elites.reduce((a, b) => a + b.x, 0) / elites.length,
       elites.reduce((a, b) => a + b.y, 0) / elites.length,
       elites.reduce((a, b) => a + b.z, 0) / elites.length,
+      // Mock rotation values (converging to 0)
+      mean[3] * 0.9,
+      mean[4] * 0.9,
+      mean[5] * 0.9,
+      // Mock gripper value (converging to -0.5)
+      mean[6] * 0.9 + (Math.random() - 0.5) * 0.1,
     ];
 
     // Calculate new std dev (shrinking)
@@ -495,7 +502,12 @@ export function IterationReplay({
       <div className="mb-6">
         <div className="flex justify-between text-sm mb-2">
           <span className="text-zinc-400">Iteration</span>
-          <span className="text-zinc-200 font-medium">{currentIteration} / {iterations.length}</span>
+          <div className="flex flex-col items-end">
+            <span className="text-zinc-200 font-medium">{currentIteration} / {iterations.length}</span>
+            {totalIterations && iterations.length < totalIterations && (
+              <span className="text-amber-400 text-xs">✓ Converged early</span>
+            )}
+          </div>
         </div>
         <input
           type="range"

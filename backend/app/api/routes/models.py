@@ -23,6 +23,7 @@ router = APIRouter(prefix="/models", tags=["models"])
 
 # Track model loading state
 _loading_model_id: Optional[str] = None
+_loading_tasks: Dict[str, asyncio.Task] = {}  # Track background loading tasks for hot-switch support
 
 # Model variants - map to actual V-JEPA2 hub models
 # Each variant corresponds to a base model that can be loaded
@@ -32,18 +33,6 @@ MODEL_VARIANTS: Dict[str, dict] = {
         "description": "Best for 16GB devices (~300M params, ~4.8GB)",
         "base_model": "vit-large",
         "is_recommended": True,  # Recommended for most users
-    },
-    "vit-huge": {
-        "name": "V-JEPA2 ViT-Huge",
-        "description": "Balanced quality/speed (~630M params, ~9.5GB)",
-        "base_model": "vit-huge",
-        "is_recommended": False,
-    },
-    "vit-giant": {
-        "name": "V-JEPA2 ViT-Giant",
-        "description": "Best quality, requires 32GB+ (~1.2B params, ~15.3GB)",
-        "base_model": "vit-giant",
-        "is_recommended": False,
     },
     "vit-giant-ac": {
         "name": "V-JEPA2-AC ViT-Giant",
@@ -63,28 +52,6 @@ MODEL_REGISTRY: Dict[str, dict] = {
         "input_resolution": 224,
         "embedding_dim": 1024,
         "layers": 24,
-        "heads": 16,
-        "is_ac": False,
-    },
-    "vit-huge": {
-        "name": "V-JEPA2 ViT-Huge",
-        "params": "630M",
-        "size_gb": 9.5,  # Actual download size
-        "description": "Balanced speed and quality",
-        "input_resolution": 224,
-        "embedding_dim": 1280,
-        "layers": 32,
-        "heads": 16,
-        "is_ac": False,
-    },
-    "vit-giant": {
-        "name": "V-JEPA2 ViT-Giant",
-        "params": "1.2B",
-        "size_gb": 15.3,  # Actual download size
-        "description": "Best quality, requires 32GB+ memory",
-        "input_resolution": 224,
-        "embedding_dim": 1408,
-        "layers": 40,
         "heads": 16,
         "is_ac": False,
     },
@@ -130,9 +97,9 @@ def _get_model_info(model_id: str) -> ModelInfo:
     if not reg:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    # Use real PyTorch hub cache check (expensive operation)
+    # Check if model is cached (either PyTorch Hub cache or checkpoint)
     loader = get_model_loader()
-    cached = loader.is_cached(model_id)
+    cached = loader.is_cached(model_id) or loader.has_checkpoint(model_id)
 
     task_id = _download_tasks.get(model_id)
     progress = 100 if cached else 0
@@ -185,7 +152,9 @@ async def get_models_status():
         elif _loading_model_id == model_id:
             status = "loading"
             download_percent = 100
-        elif loader.is_cached(model_id):
+        elif loader.is_cached(model_id) or loader.has_checkpoint(model_id):
+            # Model is cached if either PyTorch Hub cache OR checkpoint exists
+            # (Optimization #5 may delete hub cache after checkpoint creation)
             status = "cached"
             download_percent = 100
         else:
@@ -221,8 +190,11 @@ async def load_model(model_id: str):
 
     Returns immediately with status "loading", actual load happens in background.
     Unloads any currently loaded model first.
+
+    Supports hot-switching: if a model is currently loading, it will be cancelled
+    and the new model will start loading immediately.
     """
-    global _loading_model_id
+    global _loading_model_id, _loading_tasks
 
     if model_id not in MODEL_REGISTRY:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -233,21 +205,29 @@ async def load_model(model_id: str):
     if loader.is_loaded(model_id):
         return {"status": "already_loaded", "model_id": model_id}
 
-    # Check if cached (downloaded)
-    if not loader.is_cached(model_id):
+    # Check if cached (downloaded) - either hub cache or checkpoint
+    if not (loader.is_cached(model_id) or loader.has_checkpoint(model_id)):
         raise HTTPException(
             status_code=400,
             detail="Model not downloaded. Download first using POST /models/{model_id}/download"
         )
 
-    # Check if already loading
+    # Check if already loading this specific model
     if _loading_model_id == model_id:
         return {"status": "already_loading", "model_id": model_id}
+
+    # ✅ HOT-SWITCH: Cancel existing load if switching to different model
+    if _loading_model_id and _loading_model_id != model_id:
+        logger.info(f"🔄 Hot-switch: Cancelling load of {_loading_model_id} to switch to {model_id}")
+        old_task = _loading_tasks.get(_loading_model_id)
+        if old_task and not old_task.done():
+            old_task.cancel()
+        _loading_tasks.pop(_loading_model_id, None)
 
     # Set loading state
     _loading_model_id = model_id
 
-    # Start loading in background thread
+    # Start loading in background thread with cancellation support
     async def _load_in_background():
         global _loading_model_id
         loop = asyncio.get_event_loop()
@@ -256,20 +236,23 @@ async def load_model(model_id: str):
             await loop.run_in_executor(None, lambda: loader.load_model(model_id))
             logger.info(f"✓ Model {model_id} loaded successfully in background task")
             logger.info(f"  Loader state: is_loaded={loader.is_loaded(model_id)}, loaded_id={loader._loaded_model_id}")
+        except asyncio.CancelledError:
+            logger.info(f"⚠️ Load of {model_id} was cancelled (hot-switch)")
+            raise  # ✅ Propagate cancellation
         except Exception as e:
             logger.error(f"✗ Failed to load model {model_id} in background task: {e}")
             import traceback
             logger.error(traceback.format_exc())
         finally:
-            _loading_model_id = None
-            logger.info(f"Background loading task for {model_id} completed, _loading_model_id cleared")
+            # ✅ Only clear if still loading this model (may have been switched)
+            if _loading_model_id == model_id:
+                _loading_model_id = None
+            _loading_tasks.pop(model_id, None)
+            logger.info(f"Background loading task for {model_id} completed")
 
-    # Keep reference to prevent garbage collection
+    # Create and store task for cancellation support
     task = asyncio.create_task(_load_in_background())
-    # Store task reference
-    if not hasattr(load_model, '_tasks'):
-        load_model._tasks = []
-    load_model._tasks.append(task)
+    _loading_tasks[model_id] = task
 
     return {
         "status": "loading",
@@ -365,8 +348,8 @@ async def download_model(model_id: str):
 
     loader = get_model_loader()
 
-    # Check if already cached
-    if loader.is_cached(model_id):
+    # Check if already cached (either hub cache or checkpoint)
+    if loader.is_cached(model_id) or loader.has_checkpoint(model_id):
         return {"status": "already_cached", "model_id": model_id}
 
     # Check if already downloading/loading
@@ -450,7 +433,7 @@ async def get_download_status(model_id: str):
         raise HTTPException(status_code=404, detail="Model not found")
 
     loader = get_model_loader()
-    if loader.is_cached(model_id):
+    if loader.is_cached(model_id) or loader.has_checkpoint(model_id):
         return {
             "model_id": model_id,
             "status": "cached",
@@ -480,15 +463,31 @@ async def get_download_status(model_id: str):
 
 @router.post("/{model_id}/download/cancel")
 async def cancel_download(model_id: str):
-    """Cancel an ongoing download."""
-    task_id = _download_tasks.get(model_id)
-    if not task_id:
-        raise HTTPException(status_code=400, detail="No download in progress")
+    """
+    Cancel an ongoing download.
 
-    # For real PyTorch Hub downloads, we can't easily cancel mid-download
-    # Just clear the task and progress
-    _download_tasks.pop(model_id, None)
-    clear_download_progress(model_id)
+    Also handles stale "downloading" states from interrupted downloads
+    (e.g., after backend restart) by clearing download progress.
+    """
+    # Check if there's an active download task
+    task_id = _download_tasks.get(model_id)
+
+    if task_id:
+        # Active download - clear task and progress
+        _download_tasks.pop(model_id, None)
+        clear_download_progress(model_id)
+        logger.info(f"Cancelled active download for {model_id}")
+    else:
+        # No active task, but might have stale progress from interrupted download
+        progress = get_download_progress(model_id)
+        if progress and progress.get("total", 0) > 0:
+            # Stale download state detected - clear it
+            clear_download_progress(model_id)
+            logger.info(f"Cleared stale download progress for {model_id}")
+        else:
+            # No download at all - this shouldn't happen if UI is in sync
+            logger.warning(f"Cancel requested for {model_id} but no download found")
+            # Still return success to allow UI to reset
 
     return {"status": "cancelled", "model_id": model_id}
 
@@ -526,7 +525,7 @@ async def get_cache_summary():
     total_cached_gb = 0
 
     for model_id in MODEL_REGISTRY:
-        if loader.is_cached(model_id):
+        if loader.is_cached(model_id) or loader.has_checkpoint(model_id):
             reg = MODEL_REGISTRY[model_id]
             cached.append({
                 "id": model_id,

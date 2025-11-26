@@ -1,5 +1,13 @@
 {
+  "name": "v-jepa2-demo",
+  "version": "1.0.0",
+  "description": "V-JEPA2 Interactive Demo",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --reload-dir .",
+    "dev:frontend": "cd frontend && npm run dev"
+  },
   "devDependencies": {
-    "playwright": "^1.57.0"
+    "concurrently": "^8.2.2"
   }
 }

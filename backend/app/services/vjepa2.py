@@ -537,13 +537,10 @@ class VJEPA2ModelLoader:
             logger.info(f"Saving checkpoint for {model_id} to {checkpoint_path}...")
             start_time = time.time()
 
-            # Prepare checkpoint data (save full models to CPU for device-agnostic storage)
-            # Optimization: Save entire model objects instead of just state_dicts
-            # This eliminates the need to call torch.hub.load() on checkpoint restore (33% faster)
-            encoder_cpu = self._encoder.cpu()
-
+            # Prepare checkpoint data (save state_dicts for portable storage)
+            # Use state_dict format instead of full model objects to avoid module import issues
             checkpoint = {
-                "encoder": encoder_cpu,  # Full model with architecture
+                "encoder_state_dict": self._encoder.state_dict(),
                 "model_id": model_id,
                 "pytorch_version": torch.__version__.split("+")[0],
                 "device_type": self.device_info.device_type,
@@ -552,11 +549,9 @@ class VJEPA2ModelLoader:
                 "hub_name": self.MODEL_HUB_NAMES.get(model_id, "unknown"),
             }
 
-            # For AC models, also save predictor
-            predictor_cpu = None
+            # For AC models, also save predictor state_dict
             if model_id in self.AC_MODELS and self._predictor is not None:
-                predictor_cpu = self._predictor.cpu()
-                checkpoint["predictor"] = predictor_cpu  # Full predictor model
+                checkpoint["predictor_state_dict"] = self._predictor.state_dict()
 
             # Write to temporary file first (atomic write)
             torch.save(checkpoint, tmp_checkpoint_path)
@@ -577,8 +572,8 @@ class VJEPA2ModelLoader:
                 "timestamp": checkpoint["timestamp"],
                 "hub_name": checkpoint["hub_name"],
                 "checksum": checksum,
-                "has_predictor": "predictor" in checkpoint,
-                "format_version": "2.0",  # Track checkpoint format (1.0=state_dict, 2.0=full_model)
+                "has_predictor": "predictor_state_dict" in checkpoint,
+                "format_version": "1.0",  # Track checkpoint format (1.0=state_dict, 2.0=full_model - deprecated)
             }
 
             # Write metadata
@@ -616,15 +611,17 @@ class VJEPA2ModelLoader:
             except Exception as e:
                 logger.debug(f"Failed to cleanup hub cache (non-critical): {e}")
 
-            # Move models back to original device
-            if encoder_cpu is not None:
-                self._encoder = encoder_cpu.to(device=self.device)
-                if self._get_torch_dtype() == torch.float16:
-                    self._encoder = self._encoder.half()
-            if predictor_cpu is not None:
-                self._predictor = predictor_cpu.to(device=self.device)
-                if self._get_torch_dtype() == torch.float16:
-                    self._predictor = self._predictor.half()
+            # ✅ Cleanup: Delete checkpoint dict to free memory
+            del checkpoint
+
+            # Force garbage collection
+            import gc
+            gc.collect()
+
+            # Empty MPS cache to reclaim GPU memory
+            if self.device_info.device_type == "mps":
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
 
             return True
 
@@ -655,35 +652,19 @@ class VJEPA2ModelLoader:
             # weights_only=False is safe here since we trust our own checkpoints
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
-            # Check checkpoint format version
-            # Load metadata to determine format
-            meta_path = self._get_checkpoint_meta_path(model_id)
-            format_version = "1.0"  # Default to old format
-            if meta_path.exists():
-                with open(meta_path, 'r') as f:
-                    meta = json.load(f)
-                    format_version = meta.get("format_version", "1.0")
+            # Load model architecture from PyTorch Hub (lightweight, no weights download)
+            hub_name = self.MODEL_HUB_NAMES[model_id]
+            logger.debug(f"Loading model architecture from PyTorch Hub: {hub_name}")
+            result = torch.hub.load(
+                'facebookresearch/vjepa2',
+                hub_name,
+                pretrained=False,  # Don't download weights, we have checkpoint
+                trust_repo=True,
+            )
+            encoder, predictor = result
 
-            # Format 2.0: Full model saved (optimized, no hub call needed)
-            if format_version == "2.0" and "encoder" in checkpoint:
-                logger.debug(f"Loading optimized checkpoint format 2.0")
-                encoder = checkpoint["encoder"]
-                predictor = checkpoint.get("predictor", None)
-            # Format 1.0: Only state_dict saved (legacy, requires hub call)
-            else:
-                logger.debug(f"Loading legacy checkpoint format 1.0")
-                # Load from PyTorch Hub to get model architecture (but we'll overwrite weights)
-                hub_name = self.MODEL_HUB_NAMES[model_id]
-                result = torch.hub.load(
-                    'facebookresearch/vjepa2',
-                    hub_name,
-                    pretrained=False,  # Don't download weights, we have checkpoint
-                    trust_repo=True,
-                )
-                encoder, predictor = result
-
-                # Load state dicts
-                encoder.load_state_dict(checkpoint["encoder_state_dict"])
+            # Load state dicts from checkpoint
+            encoder.load_state_dict(checkpoint["encoder_state_dict"])
 
             # Move to device and set dtype
             dtype = self._get_torch_dtype()
@@ -704,11 +685,8 @@ class VJEPA2ModelLoader:
 
             # Load predictor for AC models
             if model_id in self.AC_MODELS:
-                # Handle both format 1.0 (state_dict) and 2.0 (full model)
-                if format_version == "1.0" and "predictor_state_dict" in checkpoint:
+                if "predictor_state_dict" in checkpoint and predictor is not None:
                     predictor.load_state_dict(checkpoint["predictor_state_dict"])
-
-                if predictor is not None:
                     predictor = predictor.to(device=self.device)
                     if dtype == torch.float16:
                         predictor = predictor.half()
@@ -720,7 +698,22 @@ class VJEPA2ModelLoader:
                         param.requires_grad = False
                 self._predictor = predictor
             else:
-                self._predictor = predictor
+                self._predictor = None
+
+            # ✅ FIX: Explicitly delete checkpoint dict to free CPU copies
+            # This prevents memory leaks when loading models from checkpoints
+            del checkpoint
+            # Note: encoder/predictor local variables now point to GPU models (self._encoder/self._predictor)
+            # Original CPU copies from checkpoint are freed by deleting checkpoint dict
+
+            # ✅ FIX: Force garbage collection to immediately free memory
+            import gc
+            gc.collect()
+
+            # ✅ FIX: Empty MPS cache to reclaim GPU memory
+            if self.device_info.device_type == "mps":
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
 
             elapsed = time.time() - start_time
             logger.info(f"✅ Model loaded from checkpoint in {elapsed:.1f}s")
@@ -1082,7 +1075,7 @@ class VJEPA2Inference:
         return energy.cpu().numpy()
 
     @torch.inference_mode()
-    def evaluate_actions(
+    def _evaluate_actions_embedding(
         self,
         current_emb: torch.Tensor,
         goal_emb: torch.Tensor,
@@ -1270,7 +1263,7 @@ class VJEPA2Inference:
                 if is_ac:
                     energies = self.evaluate_actions_ac(actions)
                 else:
-                    energies = self.evaluate_actions(current_emb, goal_emb, actions)
+                    energies = self._evaluate_actions_embedding(current_emb, goal_emb, actions)
 
                 # Select elite samples (lowest energy) - use argpartition for O(n) vs O(n log n)
                 # argpartition is 3-5x faster on M4 when we only need top-k elements
@@ -1383,6 +1376,74 @@ class VJEPA2Inference:
             num_iterations=3,
             elite_fraction=0.2,
         )
+
+    @torch.inference_mode()
+    def evaluate_actions(
+        self,
+        current_image: Image.Image,
+        goal_image: Image.Image,
+        actions: List[List[float]],
+    ) -> Dict[str, Any]:
+        """
+        Evaluate a list of actions and return their energy values.
+
+        This is used for visualizing the energy landscape by computing
+        real model predictions for multiple action candidates.
+
+        IMPORTANT: Uses the SAME energy function as CEM planning to ensure
+        the landscape matches the optimization process.
+
+        Args:
+            current_image: Current state image
+            goal_image: Goal state image
+            actions: List of actions to evaluate [[x,y,z], ...] (3D or 7D)
+
+        Returns:
+            Dictionary with:
+                - energies: List of {action, energy} dicts
+                - min_energy: Minimum energy value
+                - max_energy: Maximum energy value
+                - is_ac_model: Whether action-conditioned model was used
+        """
+        if not self.loader.is_loaded():
+            raise ValueError("No model loaded. Load a model first.")
+
+        # Check if we have an AC model
+        is_ac = self.loader.is_ac_model()
+
+        # Convert actions to numpy array for consistency with CEM
+        actions_np = np.array(actions, dtype=np.float32)
+
+        # If 3D actions but AC model, pad to 7D
+        if is_ac and actions_np.shape[1] == 3:
+            # Pad with zeros for orientation (roll, pitch, yaw) and gripper
+            padding = np.zeros((actions_np.shape[0], 4), dtype=np.float32)
+            actions_np = np.concatenate([actions_np, padding], axis=1)
+
+        # Encode images first (required for both AC and non-AC models)
+        current_emb, goal_emb = self.encode_images(current_image, goal_image)
+
+        # Compute energies using the SAME method as CEM planning
+        if is_ac:
+            # Use action-conditioned evaluation (same as CEM)
+            # encode_images has already cached the patch embeddings for AC models
+            energies_np = self.evaluate_actions_ac(actions_np)
+        else:
+            # Use standard embedding-based evaluation (same as CEM)
+            energies_np = self._evaluate_actions_embedding(current_emb, goal_emb, actions_np)
+
+        # Build result
+        result_energies = [
+            {"action": action, "energy": float(eng)}
+            for action, eng in zip(actions, energies_np)
+        ]
+
+        return {
+            "energies": result_energies,
+            "min_energy": float(energies_np.min()),
+            "max_energy": float(energies_np.max()),
+            "is_ac_model": is_ac,
+        }
 
 
 # Global instances

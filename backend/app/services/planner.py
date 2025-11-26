@@ -368,6 +368,25 @@ class PlannerService:
             task.error = "V-JEPA2 model not available"
             raise RuntimeError(task.error)
 
+        # Send "Encoding images..." status before CEM starts
+        encoding_progress = PlanningProgress(
+            status="encoding",
+            iteration=0,
+            total_iterations=iterations,
+            best_energy=0.0,
+            samples_evaluated=0,
+            elapsed_seconds=0.0,
+            eta_seconds=0.0,
+        )
+        task.progress = encoding_progress
+
+        if progress_callback:
+            main_loop.call_soon_threadsafe(
+                lambda p=encoding_progress: main_loop.create_task(progress_callback(p))
+            )
+            # Give WebSocket time to send the message
+            await asyncio.sleep(0.05)
+
         # Track energy history for progress updates
         energy_history = []
 
@@ -453,6 +472,21 @@ class PlannerService:
             f"confidence={result.confidence}, "
             f"samples={cem_result.get('samples_evaluated', 'N/A')}"
         )
+
+        # Aggressive memory cleanup after task completion
+        import gc
+        import torch
+
+        gc.collect()
+
+        # Empty GPU cache
+        if inference.device.type == "mps":
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+        elif inference.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        logger.info("Memory cleanup completed")
 
         # Trigger cleanup after task completion
         self._cleanup_old_tasks()

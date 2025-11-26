@@ -85,13 +85,22 @@ pip install -r requirements.txt
 
 ### Running the Application
 
+**Option 1: Run both backend and frontend together (recommended)**
+```bash
+npm run dev
+```
+
+**Option 2: Run separately**
+
 1. **Start the backend** (from `backend/` directory)
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+cd backend
+python3 -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --reload-dir .
 ```
 
 2. **Start the frontend** (from `frontend/` directory)
 ```bash
+cd frontend
 npm run dev
 ```
 

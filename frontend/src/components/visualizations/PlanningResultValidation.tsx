@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { ACTION_DISPLAY_SCALING } from "@/constants/actionDisplay";
 
 interface PlanningResultValidationProps {
   currentImage?: string;
@@ -28,10 +29,18 @@ export function PlanningResultValidation({
   // Format action for display
   const actionStr = useMemo(() => {
     if (action.length === 3) {
-      return `[${action.map(v => v.toFixed(2)).join(', ')}] cm`;
+      // 3D action: apply scaling for position
+      return `[${action.map(v => (v * ACTION_DISPLAY_SCALING.POSITION_TO_CM).toFixed(1)).join(', ')}] cm`;
     } else if (action.length === 7) {
-      const pos = action.slice(0, 3).map(v => v.toFixed(2)).join(', ');
-      return `Position: [${pos}] cm`;
+      // 7D DROID action: [x, y, z, roll, pitch, yaw, gripper]
+      const pos = action.slice(0, 3).map(v => (v * ACTION_DISPLAY_SCALING.POSITION_TO_CM).toFixed(1));
+      const rot = action.slice(3, 6).map(v => (v * ACTION_DISPLAY_SCALING.ROTATION_TO_DEG).toFixed(1));
+      const gripper = action[6].toFixed(2);
+      return (
+        `Pos: [${pos.join(', ')}] cm\n` +
+        `Rot: [${rot.join(', ')}]°\n` +
+        `Gripper: ${gripper}`
+      );
     }
     return action.map(v => v.toFixed(2)).join(', ');
   }, [action]);
@@ -74,9 +83,9 @@ export function PlanningResultValidation({
         {/* Action Arrow */}
         <div className="flex flex-col items-center gap-2 px-4">
           <div className="text-4xl text-indigo-400">→</div>
-          <div className="text-xs text-zinc-400 text-center max-w-[120px]">
+          <div className={`text-xs text-zinc-400 text-center ${action.length === 7 ? 'max-w-[180px]' : 'max-w-[120px]'}`}>
             <p className="font-semibold text-zinc-300 mb-1">Action</p>
-            <p className="font-mono text-[10px]">{actionStr}</p>
+            <p className="font-mono text-[10px] whitespace-pre-line">{actionStr}</p>
           </div>
         </div>
 

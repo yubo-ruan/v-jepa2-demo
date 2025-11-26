@@ -42,7 +42,8 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
     reset,
     canGenerate,
     estimatedTime,
-    estimatedCost,
+    currentImageUploadId,
+    goalImageUploadId,
   } = usePlanning();
 
   const { preset, samples, iterations, currentImage, goalImage, hasResults, isProcessing, progress, result, error } = planningState;
@@ -56,6 +57,23 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
   const loadedModelInfo = models.find(m => m.id === loadedModel);
 
   const [showDetailsModal, setShowDetailsModal] = useState(false);
+
+  // Track previous blob URLs for cleanup
+  const prevCurrentImageRef = useRef<string | null>(null);
+  const prevGoalImageRef = useRef<string | null>(null);
+
+  // Initialize refs with current images on mount
+  useEffect(() => {
+    if (currentImage?.startsWith("blob:")) {
+      prevCurrentImageRef.current = currentImage;
+    }
+  }, []); // Only run on mount
+
+  useEffect(() => {
+    if (goalImage?.startsWith("blob:")) {
+      prevGoalImageRef.current = goalImage;
+    }
+  }, []); // Only run on mount
 
   // Export results as JSON
   const handleExport = () => {
@@ -96,10 +114,6 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
       showToast(error, "error");
     }
   }, [error, showToast]);
-
-  // Note: We don't revoke blob URLs to avoid broken image issues
-  // This causes a small memory leak, but blob URLs are tiny (just pointers)
-  // and will be cleaned up when the page is closed
 
   // Wrapper to pass loaded model to planning
   const handleStartPlanning = useCallback(() => {
@@ -144,12 +158,22 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
       return;
     }
 
+    // Revoke previous blob URL if it exists
+    if (type === "current" && prevCurrentImageRef.current?.startsWith("blob:")) {
+      URL.revokeObjectURL(prevCurrentImageRef.current);
+    } else if (type === "goal" && prevGoalImageRef.current?.startsWith("blob:")) {
+      URL.revokeObjectURL(prevGoalImageRef.current);
+    }
+
     // Create preview URL
     const previewUrl = URL.createObjectURL(file);
 
+    // Update ref with new URL
     if (type === "current") {
+      prevCurrentImageRef.current = previewUrl;
       setCurrentImage(previewUrl);
     } else {
+      prevGoalImageRef.current = previewUrl;
       setGoalImage(previewUrl);
     }
 
@@ -195,8 +219,8 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
     if (progress?.energyHistory && progress.energyHistory.length > 0) {
       return progress.energyHistory;
     }
-    // Fallback: mock data
-    return [8, 6.5, 5.2, 4.1, 3.5, 3.1, 2.8, 2.6, 2.5, 2.45];
+    // No fallback - return empty array if no real data
+    return [];
   }, [result?.energyHistory, progress?.energyHistory]);
 
   const getBarColor = (progressRatio: number) => {
@@ -213,7 +237,12 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
   };
 
   // Calculate progress percentage
-  const progressPercent = progress ? Math.round((progress.iteration / progress.totalIterations) * 100) : 0;
+  // If completed (hasResults), show 100% regardless of early convergence
+  const progressPercent = hasResults
+    ? 100
+    : progress
+      ? Math.round((progress.iteration / progress.totalIterations) * 100)
+      : 0;
 
   return (
     <>
@@ -407,16 +436,12 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
           </div>
         </div>
 
-        {/* Time/Cost Estimator */}
+        {/* Time Estimator */}
         <div className="flex gap-4 mb-5 p-3 bg-zinc-900 rounded-lg">
           <div className="flex items-center gap-2 text-sm">
             <ClockIcon />
             <span className="text-zinc-400">Est. time:</span>
             <span className="text-zinc-200 font-medium">~{estimatedTime}-{estimatedTime + 1} min</span>
-          </div>
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-zinc-400">GPU cost:</span>
-            <span className="text-zinc-200 font-medium">~${estimatedCost}</span>
           </div>
         </div>
 
@@ -507,7 +532,13 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
             {/* Progress Bar */}
             <div className="mb-5">
               <div className="flex justify-between text-sm mb-2">
-                <span className="text-zinc-300 font-medium">{hasResults ? "Completed" : "Processing"}</span>
+                <span className="text-zinc-300 font-medium">
+                  {hasResults
+                    ? "Completed"
+                    : progress?.status === "encoding"
+                      ? "Encoding images..."
+                      : "Processing"}
+                </span>
                 <span className="text-indigo-400 font-medium">{progressPercent}%</span>
               </div>
               <div className="h-3 bg-zinc-700 rounded-full overflow-hidden">
@@ -519,7 +550,17 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
             <div className="grid grid-cols-3 gap-4 mb-5">
               <div className="bg-zinc-900 rounded-lg p-4">
                 <p className="text-xs text-zinc-500 mb-1">Iteration</p>
-                <p className="text-xl font-semibold text-zinc-200">{progress?.iteration ?? 0} / {progress?.totalIterations ?? iterations}</p>
+                <div className="flex flex-col">
+                  <p className="text-xl font-semibold text-zinc-200">
+                    {hasResults
+                      ? `${result?.energyHistory?.length ?? iterations} / ${iterations}`
+                      : `${progress?.iteration ?? 0} / ${progress?.totalIterations ?? iterations}`
+                    }
+                  </p>
+                  {hasResults && result?.energyHistory && result.energyHistory.length < iterations && (
+                    <p className="text-xs text-amber-400 mt-1">✓ Converged early</p>
+                  )}
+                </div>
               </div>
               <div className="bg-zinc-900 rounded-lg p-4">
                 <p className="text-xs text-zinc-500 mb-1">Elapsed</p>
@@ -539,30 +580,45 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               </div>
               {/* Mini Convergence Chart with gradient colors */}
               <div className="h-20 flex items-end gap-1">
-                {(() => {
-                  const maxEnergy = Math.max(...convergenceData, 0.1);
-                  const minEnergy = Math.min(...convergenceData, maxEnergy);
-                  const range = maxEnergy - minEnergy;
-                  // Add 20% padding to top for better visualization
-                  const scale = range > 0 ? range * 1.2 : maxEnergy;
+                {convergenceData.length > 0 ? (
+                  (() => {
+                    const maxEnergy = Math.max(...convergenceData, 0.1);
+                    const minEnergy = Math.min(...convergenceData, maxEnergy);
+                    const range = maxEnergy - minEnergy;
+                    // Add 20% padding to top for better visualization
+                    const scale = range > 0 ? range * 1.2 : maxEnergy;
 
-                  return convergenceData.map((val, i, arr) => {
-                    const progress = i / (arr.length - 1);
-                    const heightPercent = scale > 0 ? ((val - minEnergy) / scale) * 100 : 10;
-                    return (
-                      <div
-                        key={i}
-                        className={`flex-1 bg-gradient-to-t ${getBarColor(progress)} rounded-t opacity-90 transition-all duration-500`}
-                        style={{ height: `${Math.max(heightPercent, 2)}%` }}
-                      />
-                    );
-                  });
-                })()}
+                    return convergenceData.map((val, i, arr) => {
+                      const progress = i / (arr.length - 1);
+                      const heightPercent = scale > 0 ? ((val - minEnergy) / scale) * 100 : 10;
+                      return (
+                        <div
+                          key={i}
+                          className={`flex-1 bg-gradient-to-t ${getBarColor(progress)} rounded-t opacity-90 hover:opacity-100 transition-all duration-300 cursor-pointer relative group`}
+                          style={{ height: `${Math.max(heightPercent, 2)}%` }}
+                          title={`Iteration ${i + 1}: ${val.toFixed(2)}`}
+                        >
+                          {/* Hover tooltip */}
+                          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-zinc-900 text-white text-xs rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-10 border border-zinc-700">
+                            <div className="font-medium">Iter {i + 1}</div>
+                            <div className="text-green-400">{val.toFixed(2)}</div>
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-zinc-600 text-xs">
+                    Waiting for data...
+                  </div>
+                )}
               </div>
-              <div className="flex justify-between text-xs text-zinc-600 mt-2">
-                <span>Iter 1</span>
-                <span>Iter {convergenceData.length}</span>
-              </div>
+              {convergenceData.length > 0 && (
+                <div className="flex justify-between text-xs text-zinc-600 mt-2">
+                  <span>Iter 1</span>
+                  <span>Iter {convergenceData.length}</span>
+                </div>
+              )}
             </div>
 
             {/* Control Button - only show when processing */}
@@ -632,10 +688,19 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
       </div>
 
       {/* Iteration Replay - shows after results are available */}
-      {hasResults && (
+      {hasResults && result?.energyHistory && (
         <div className="mb-8">
           <IterationReplay
-            totalIterations={iterations}
+            iterations={result.energyHistory.map((energy, index) => ({
+              iteration: index + 1,
+              samples: [], // We don't have individual samples, only energy values
+              mean: result.action, // Use final action (7D) as mean
+              stdDev: 0, // We don't have std dev from backend
+              bestEnergy: energy,
+              eliteCount: Math.floor(samples * 0.1),
+              totalSamples: samples,
+            }))}
+            totalIterations={result.energyHistory.length}
             totalSamples={samples}
             eliteFraction={0.1}
           />
@@ -848,9 +913,16 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
                   <span className="text-xs text-zinc-500">Energy: </span>
                   <span className="text-base font-semibold text-zinc-200">{result?.energy?.toFixed(2) ?? "—"}</span>
                 </div>
-                <div className="bg-zinc-900 rounded-lg px-4 py-3">
-                  <span className="text-xs text-zinc-500">Iterations: </span>
-                  <span className="text-base font-semibold text-zinc-200">{result?.energyHistory?.length ?? iterations}</span>
+                <div className="bg-zinc-900 rounded-lg px-4 py-3 flex flex-col">
+                  <div>
+                    <span className="text-xs text-zinc-500">Iterations: </span>
+                    <span className="text-base font-semibold text-zinc-200">
+                      {result?.energyHistory?.length ?? iterations} / {iterations}
+                    </span>
+                  </div>
+                  {result?.energyHistory && result.energyHistory.length < iterations && (
+                    <span className="text-xs text-amber-400 mt-0.5">✓ Converged early</span>
+                  )}
                 </div>
               </div>
 
@@ -877,10 +949,44 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
             <div className="w-full lg:w-[340px] shrink-0">
               <EnergyLandscape
                 optimalAction={(result?.action ?? [0, 0, 0]) as [number, number, number]}
+                currentImage={currentImageUploadId ?? currentImage ?? undefined}
+                goalImage={goalImageUploadId ?? goalImage ?? undefined}
+                modelId={loadedModel ?? undefined}
                 onActionSelect={(action, energy) => {
                   setSelectedAction({ action, energy });
                 }}
               />
+
+              {/* Selected Action Display */}
+              {selectedAction && (
+                <div className="mt-3 p-3 bg-zinc-800 rounded-lg border border-zinc-700">
+                  <p className="text-xs text-zinc-400 mb-2 font-medium">Selected Point</p>
+                  <div className="space-y-2">
+                    <div>
+                      <p className="text-xs text-zinc-500">Action</p>
+                      <p className="text-sm font-mono text-zinc-200">
+                        [{selectedAction.action.map(v => v.toFixed(2)).join(', ')}]
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-zinc-500">Energy</p>
+                      <p className="text-sm font-semibold text-amber-400">
+                        {selectedAction.energy.toFixed(2)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-zinc-500">Distance from Optimal</p>
+                      <p className="text-sm text-zinc-300">
+                        {Math.sqrt(
+                          selectedAction.action.reduce((sum, v, i) =>
+                            sum + Math.pow(v - (result?.action[i] ?? 0), 2), 0
+                          )
+                        ).toFixed(2)} cm
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
             );

@@ -88,7 +88,10 @@ class WebSocketManager:
 
     async def broadcast_completed(self, task_id: str, result: dict):
         """Broadcast completion."""
-        await self.send_message(task_id, {"type": "completed", "data": result})
+        logger.info(f"[WebSocket] Broadcasting completion for task {task_id}")
+        logger.info(f"[WebSocket] Result data: {result}")
+        num_sent = await self.send_message(task_id, {"type": "completed", "data": result})
+        logger.info(f"[WebSocket] Completion message sent to {num_sent} clients")
 
     async def broadcast_error(self, task_id: str, error: str):
         """Broadcast error."""

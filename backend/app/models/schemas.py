@@ -21,7 +21,7 @@ class PlanningRequest(BaseModel):
 
 class PlanningProgress(BaseModel):
     """Progress update during planning."""
-    status: Literal["loading_model", "running", "completed"] = "running"
+    status: Literal["loading_model", "encoding", "running", "completed"] = "running"
     model_loading: Optional[str] = None  # Model name when status is "loading_model"
     download_progress: Optional[float] = None  # 0.0-1.0 for model download progress
     download_total_gb: Optional[float] = None  # Total download size in GB
@@ -65,6 +65,28 @@ class PlanningResultResponse(BaseModel):
     progress: Optional[PlanningProgress] = None
     result: Optional[ActionResult] = None
     error: Optional[str] = None
+
+
+class EvaluateActionsRequest(BaseModel):
+    """Request to evaluate multiple actions against goal embeddings."""
+    current_image: str  # base64 or upload_id
+    goal_image: str  # base64 or upload_id
+    actions: List[List[float]]  # List of actions to evaluate [[x,y,z], ...]
+    model: str = "vit-giant"
+
+
+class ActionEnergy(BaseModel):
+    """Energy value for a single action."""
+    action: List[float]
+    energy: float
+
+
+class EvaluateActionsResponse(BaseModel):
+    """Response with energy values for all evaluated actions."""
+    energies: List[ActionEnergy]
+    min_energy: float
+    max_energy: float
+    is_ac_model: bool = False
 
 
 # =============================================================================

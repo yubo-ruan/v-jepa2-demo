@@ -134,7 +134,6 @@ async def get_device_info():
 async def get_app_config():
     """Get current application configuration."""
     return {
-        "inference_mode": settings.inference_mode,
         "default_model": settings.default_model,
         "default_samples": settings.default_samples,
         "default_iterations": settings.default_iterations,

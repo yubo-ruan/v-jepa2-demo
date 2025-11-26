@@ -5,7 +5,7 @@ import { Header, Sidebar } from "@/components/layout";
 import { UploadPage, ConfigPage, HistoryPage } from "@/components/pages";
 import { ResearchDashboard, type ResearchTab } from "@/components/research/ResearchDashboard";
 import { Toast } from "@/components/ui";
-import { ToastProvider, ConfigProvider, PlanningProvider, ModelsProvider, useToast } from "@/contexts";
+import { ToastProvider, ConfigProvider, PlanningProvider, ModelsProvider, HistoryProvider, useToast } from "@/contexts";
 import type { MainTab } from "@/types";
 
 function MainContent() {
@@ -54,9 +54,11 @@ export default function Home() {
     <ToastProvider>
       <ConfigProvider>
         <ModelsProvider>
-          <PlanningProvider>
-            <MainContent />
-          </PlanningProvider>
+          <HistoryProvider>
+            <PlanningProvider>
+              <MainContent />
+            </PlanningProvider>
+          </HistoryProvider>
         </ModelsProvider>
       </ConfigProvider>
     </ToastProvider>

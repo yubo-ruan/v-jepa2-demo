@@ -309,10 +309,10 @@ class VJEPA2ModelLoader:
 
             # Move to device and set dtype
             dtype = self._get_torch_dtype()
-            encoder = encoder.to(device=self.device, dtype=dtype)
-            # Force float32 for AC models to avoid mixed precision issues
-            if model_id in self.AC_MODELS:
-                encoder = encoder.float()
+            encoder = encoder.to(device=self.device)
+            # Use .half() to ensure ALL layers/buffers are FP16, not just parameters
+            if dtype == torch.float16:
+                encoder = encoder.half()
             encoder.eval()
 
             # Disable gradients for inference
@@ -328,9 +328,10 @@ class VJEPA2ModelLoader:
 
             # For AC models, also load predictor to GPU for action-conditioned prediction
             if model_id in self.AC_MODELS:
-                predictor = predictor.to(device=self.device, dtype=dtype)
-                # Force float32 to match encoder and avoid mixed precision issues
-                predictor = predictor.float()
+                predictor = predictor.to(device=self.device)
+                # Use .half() to ensure ALL layers/buffers are FP16, not just parameters
+                if dtype == torch.float16:
+                    predictor = predictor.half()
                 predictor.eval()
                 for param in predictor.parameters():
                     param.requires_grad = False

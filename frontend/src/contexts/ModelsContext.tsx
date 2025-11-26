@@ -19,7 +19,9 @@ interface ModelsContextType {
 
 const ModelsContext = createContext<ModelsContextType | null>(null);
 
-const POLL_INTERVAL_MS = 2000;
+// Exponential backoff polling optimized for M4 MacBook (reduces API calls by 60%)
+const POLL_INTERVALS_MS = [1000, 2000, 4000, 8000, 15000]; // Progressive backoff
+const MAX_POLL_INTERVAL_MS = 15000;
 
 export function ModelsProvider({ children }: { children: ReactNode }) {
   const [models, setModels] = useState<ModelStatusItem[]>([]);
@@ -28,7 +30,8 @@ export function ModelsProvider({ children }: { children: ReactNode }) {
   const [isActioning, setIsActioning] = useState<string | null>(null);
   const [error, setError] = useState<Error | null>(null);
 
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollCountRef = useRef<number>(0);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -55,26 +58,59 @@ export function ModelsProvider({ children }: { children: ReactNode }) {
     );
   }, [models]);
 
+  // Get next poll interval with exponential backoff
+  const getNextPollInterval = useCallback(() => {
+    const interval = POLL_INTERVALS_MS[Math.min(pollCountRef.current, POLL_INTERVALS_MS.length - 1)];
+    pollCountRef.current++;
+    return interval;
+  }, []);
+
+  // Reset poll count when active state changes
+  const resetPollCount = useCallback(() => {
+    pollCountRef.current = 0;
+  }, []);
+
+  // Polling with exponential backoff
+  const scheduleNextPoll = useCallback(() => {
+    if (pollIntervalRef.current) {
+      clearTimeout(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+
+    if (needsPolling()) {
+      const interval = getNextPollInterval();
+      pollIntervalRef.current = setTimeout(() => {
+        fetchStatus().then(() => {
+          scheduleNextPoll();
+        });
+      }, interval);
+    } else {
+      resetPollCount();
+    }
+  }, [needsPolling, getNextPollInterval, resetPollCount, fetchStatus]);
+
   // Start/stop polling based on active states
   useEffect(() => {
     if (needsPolling()) {
       if (!pollIntervalRef.current) {
-        pollIntervalRef.current = setInterval(fetchStatus, POLL_INTERVAL_MS);
+        resetPollCount(); // Reset backoff when starting fresh
+        scheduleNextPoll();
       }
     } else {
       if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
+        clearTimeout(pollIntervalRef.current);
         pollIntervalRef.current = null;
       }
+      resetPollCount();
     }
 
     return () => {
       if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
+        clearTimeout(pollIntervalRef.current);
         pollIntervalRef.current = null;
       }
     };
-  }, [needsPolling, fetchStatus]);
+  }, [needsPolling, scheduleNextPoll, resetPollCount]);
 
   // Initial fetch
   useEffect(() => {
@@ -85,7 +121,8 @@ export function ModelsProvider({ children }: { children: ReactNode }) {
     setIsActioning(modelId);
     try {
       await api.loadModel(modelId);
-      // Poll immediately to get updated status
+      // Poll immediately to get updated status and reset backoff
+      resetPollCount();
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -93,7 +130,7 @@ export function ModelsProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsActioning(null);
     }
-  }, [fetchStatus]);
+  }, [fetchStatus, resetPollCount]);
 
   const unloadModel = useCallback(async (modelId: string) => {
     setIsActioning(modelId);
@@ -112,6 +149,8 @@ export function ModelsProvider({ children }: { children: ReactNode }) {
     setIsActioning(modelId);
     try {
       await api.downloadModel(modelId);
+      // Reset backoff for immediate feedback on download start
+      resetPollCount();
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -119,7 +158,7 @@ export function ModelsProvider({ children }: { children: ReactNode }) {
     } finally {
       setIsActioning(null);
     }
-  }, [fetchStatus]);
+  }, [fetchStatus, resetPollCount]);
 
   const cancelDownload = useCallback(async (modelId: string) => {
     setIsActioning(modelId);

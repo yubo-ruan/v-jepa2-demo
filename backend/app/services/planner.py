@@ -7,6 +7,7 @@ import time
 import uuid
 from typing import Dict, Callable, Optional
 from dataclasses import dataclass
+from collections import OrderedDict
 
 from PIL import Image
 
@@ -36,10 +37,16 @@ class PlanningTask:
 class PlannerService:
     """
     Planning service that uses V-JEPA2 for real inference.
+
+    Optimized for 16GB M4 MacBook with automatic task cleanup.
     """
 
+    # Task cleanup settings optimized for 16GB RAM
+    MAX_TASKS = 100  # Keep last 100 tasks
+    TASK_TTL_SECONDS = 3600  # 1 hour TTL
+
     def __init__(self):
-        self.tasks: Dict[str, PlanningTask] = {}
+        self.tasks: OrderedDict[str, PlanningTask] = OrderedDict()  # LRU ordering
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._vjepa_inference = None
         self._model_loaded = False
@@ -61,11 +68,47 @@ class PlannerService:
 
         return self._vjepa_inference
 
+    def _cleanup_old_tasks(self):
+        """Remove old completed tasks to prevent memory leaks."""
+        current_time = time.time()
+
+        # Remove tasks older than TTL
+        tasks_to_remove = []
+        for task_id, task in list(self.tasks.items()):
+            if task.status in ("completed", "failed", "cancelled"):
+                if task.start_time and (current_time - task.start_time) > self.TASK_TTL_SECONDS:
+                    tasks_to_remove.append(task_id)
+
+        for task_id in tasks_to_remove:
+            del self.tasks[task_id]
+            logger.debug(f"Cleaned up old task {task_id}")
+
+        # If still over limit, remove oldest completed tasks
+        if len(self.tasks) > self.MAX_TASKS:
+            completed_tasks = [
+                (tid, t) for tid, t in self.tasks.items()
+                if t.status in ("completed", "failed", "cancelled")
+            ]
+            # Sort by start_time (oldest first)
+            completed_tasks.sort(key=lambda x: x[1].start_time or 0)
+
+            to_remove = len(self.tasks) - self.MAX_TASKS
+            for task_id, _ in completed_tasks[:to_remove]:
+                del self.tasks[task_id]
+                logger.debug(f"Cleaned up task {task_id} (over limit)")
+
     def create_task(self, request: PlanningRequest) -> str:
-        """Create a new planning task."""
+        """Create a new planning task with automatic cleanup."""
+        # Clean up old tasks first
+        self._cleanup_old_tasks()
+
         task_id = str(uuid.uuid4())
         task = PlanningTask(id=task_id, request=request)
         self.tasks[task_id] = task
+
+        # Move to end (most recent)
+        self.tasks.move_to_end(task_id)
+
         return task_id
 
     def get_task(self, task_id: str) -> Optional[PlanningTask]:
@@ -353,6 +396,10 @@ class PlannerService:
             f"confidence={result.confidence}, "
             f"samples={cem_result.get('samples_evaluated', 'N/A')}"
         )
+
+        # Trigger cleanup after task completion
+        self._cleanup_old_tasks()
+
         return result
 
 

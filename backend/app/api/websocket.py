@@ -4,12 +4,16 @@ import logging
 from typing import Dict, List, Any
 
 from fastapi import WebSocket
+from fastapi.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
 
 
 class WebSocketManager:
-    """Manages WebSocket connections for task progress streaming."""
+    """Manages WebSocket connections for task progress streaming.
+
+    Optimized for 16GB M4 MacBook with automatic stale connection cleanup.
+    """
 
     def __init__(self):
         # task_id -> list of connected websockets
@@ -30,19 +34,42 @@ class WebSocketManager:
             if not self.connections[task_id]:
                 del self.connections[task_id]
 
+    def cleanup_stale_connections(self):
+        """Remove stale/disconnected WebSocket connections to prevent memory leaks."""
+        for task_id in list(self.connections.keys()):
+            stale = []
+            for ws in self.connections[task_id]:
+                # Check if websocket is still connected
+                if ws.client_state != WebSocketState.CONNECTED:
+                    stale.append(ws)
+
+            # Remove stale connections
+            for ws in stale:
+                self.disconnect(task_id, ws)
+                logger.debug(f"Cleaned up stale WebSocket for task {task_id}")
+
     async def send_message(self, task_id: str, message: Dict[str, Any]) -> int:
         """Send a message to all connections for a task.
 
         Returns the number of successful sends.
+        Automatically cleans up failed/stale connections.
         """
         if task_id not in self.connections:
             return 0
+
+        # Cleanup stale connections before sending
+        self.cleanup_stale_connections()
 
         disconnected = []
         success_count = 0
 
         for websocket in self.connections[task_id]:
             try:
+                # Check connection state before sending
+                if websocket.client_state != WebSocketState.CONNECTED:
+                    disconnected.append(websocket)
+                    continue
+
                 await websocket.send_json(message)
                 success_count += 1
             except Exception as e:

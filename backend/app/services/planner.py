@@ -187,24 +187,66 @@ class PlannerService:
         if not loader.is_loaded(model_id):
             # Get model size for progress display
             model_size_gb = loader.get_model_size_gb(model_id)
+            has_checkpoint = loader.has_checkpoint(model_id)
             is_cached = loader.is_cached(model_id)
 
-            # Send "loading_model" status before blocking model load
-            loading_progress = PlanningProgress(
-                status="loading_model",
-                model_loading=model_id,
-                download_progress=0.0 if not is_cached else 1.0,
-                download_total_gb=model_size_gb,
-                download_downloaded_gb=model_size_gb if is_cached else 0.0,
-                download_speed_mbps=None,
-                download_eta_seconds=None if is_cached else model_size_gb * 1024 / 20,  # Assume 20 MB/s initially
-                iteration=0,
-                total_iterations=iterations,
-                best_energy=0.0,
-                samples_evaluated=0,
-                elapsed_seconds=0.0,
-                eta_seconds=0.0,
-            )
+            # Determine loading strategy and status message
+            # Priority: checkpoint (fastest) > PyTorch Hub cache > download
+            if has_checkpoint:
+                # Checkpoint exists - fast path (16-40s)
+                loading_progress = PlanningProgress(
+                    status="loading_model",
+                    model_loading=model_id,
+                    download_progress=1.0,  # Show as "cached" in UI
+                    download_total_gb=model_size_gb,
+                    download_downloaded_gb=model_size_gb,
+                    download_speed_mbps=None,
+                    download_eta_seconds=None,  # Checkpoint load is fast
+                    iteration=0,
+                    total_iterations=iterations,
+                    best_energy=0.0,
+                    samples_evaluated=0,
+                    elapsed_seconds=0.0,
+                    eta_seconds=0.0,
+                )
+                logger.info(f"Loading {model_id} from checkpoint (fast path)")
+            elif is_cached:
+                # PyTorch Hub cache exists - medium path (60-120s)
+                loading_progress = PlanningProgress(
+                    status="loading_model",
+                    model_loading=model_id,
+                    download_progress=1.0,
+                    download_total_gb=model_size_gb,
+                    download_downloaded_gb=model_size_gb,
+                    download_speed_mbps=None,
+                    download_eta_seconds=None,
+                    iteration=0,
+                    total_iterations=iterations,
+                    best_energy=0.0,
+                    samples_evaluated=0,
+                    elapsed_seconds=0.0,
+                    eta_seconds=0.0,
+                )
+                logger.info(f"Loading {model_id} from PyTorch Hub cache")
+            else:
+                # Need to download - slow path (3-10+ min)
+                loading_progress = PlanningProgress(
+                    status="loading_model",
+                    model_loading=model_id,
+                    download_progress=0.0,
+                    download_total_gb=model_size_gb,
+                    download_downloaded_gb=0.0,
+                    download_speed_mbps=None,
+                    download_eta_seconds=model_size_gb * 1024 / 20,  # Assume 20 MB/s initially
+                    iteration=0,
+                    total_iterations=iterations,
+                    best_energy=0.0,
+                    samples_evaluated=0,
+                    elapsed_seconds=0.0,
+                    eta_seconds=0.0,
+                )
+                logger.info(f"Downloading {model_id} from PyTorch Hub ({model_size_gb:.1f}GB)")
+
             task.progress = loading_progress
 
             if progress_callback:
@@ -215,8 +257,8 @@ class PlannerService:
                 # Give WebSocket time to send the message
                 await asyncio.sleep(0.1)
 
-            # If model is not cached, start a background task to poll download progress
-            if not is_cached:
+            # If model is not cached AND no checkpoint, start a background task to poll download progress
+            if not is_cached and not has_checkpoint:
                 download_start_time = time.time()
 
                 async def poll_download_progress():
@@ -349,6 +391,7 @@ class PlannerService:
                 iteration=iteration,
                 total_iterations=total,
                 best_energy=round(best_energy, 3),
+                energy_history=energy_history.copy(),  # Include accumulated energy history
                 samples_evaluated=iteration * samples,
                 elapsed_seconds=round(elapsed, 1),
                 eta_seconds=round(eta, 1),

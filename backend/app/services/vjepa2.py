@@ -419,7 +419,7 @@ class VJEPA2ModelLoader:
         return self.MODEL_SIZES_GB.get(model_id, 2.0)
 
     def is_cached(self, model_id: str) -> bool:
-        """Check if a model checkpoint is already cached (downloaded)."""
+        """Check if a model checkpoint is already cached (downloaded) in PyTorch Hub."""
         # Check PyTorch hub cache directory
         hub_dir = Path(torch.hub.get_dir()) / "checkpoints"
 
@@ -435,6 +435,12 @@ class VJEPA2ModelLoader:
         if checkpoint_file:
             return (hub_dir / checkpoint_file).exists()
         return False
+
+    def has_checkpoint(self, model_id: str) -> bool:
+        """Check if a disk checkpoint exists for this model (Phase 1 checkpointing)."""
+        checkpoint_path = self._get_checkpoint_path(model_id)
+        meta_path = self._get_checkpoint_meta_path(model_id)
+        return checkpoint_path.exists() and meta_path.exists()
 
     def _get_checkpoint_path(self, model_id: str) -> Path:
         """Get the checkpoint file path for a model."""

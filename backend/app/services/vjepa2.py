@@ -310,6 +310,9 @@ class VJEPA2ModelLoader:
             # Move to device and set dtype
             dtype = self._get_torch_dtype()
             encoder = encoder.to(device=self.device, dtype=dtype)
+            # Force float32 for AC models to avoid mixed precision issues
+            if model_id in self.AC_MODELS:
+                encoder = encoder.float()
             encoder.eval()
 
             # Disable gradients for inference
@@ -326,6 +329,8 @@ class VJEPA2ModelLoader:
             # For AC models, also load predictor to GPU for action-conditioned prediction
             if model_id in self.AC_MODELS:
                 predictor = predictor.to(device=self.device, dtype=dtype)
+                # Force float32 to match encoder and avoid mixed precision issues
+                predictor = predictor.float()
                 predictor.eval()
                 for param in predictor.parameters():
                     param.requires_grad = False
@@ -568,21 +573,25 @@ class VJEPA2Inference:
 
         if is_ac:
             # For AC models, keep full patch embeddings for predictor
-            # Encode each frame separately for proper conditioning
+            # Prepare single-frame videos for separate encoding
             current_tensor = self.preprocess_image(current_image, for_ac=True)
             goal_tensor = self.preprocess_image(goal_image, for_ac=True)
 
-            # Create single-frame "videos" with temporal repetition
-            # AC model expects (B, C, T, H, W) format
-            current_video = current_tensor.unsqueeze(0).unsqueeze(2).repeat(1, 1, 2, 1, 1)
-            goal_video = goal_tensor.unsqueeze(0).unsqueeze(2).repeat(1, 1, 2, 1, 1)
+            # Create proper video format: (C, H, W) -> (B=1, C, T=2, H, W)
+            # Stack frames along time dimension, then permute
+            current_video = torch.stack([current_tensor, current_tensor], dim=0)  # (T, C, H, W)
+            current_video = current_video.permute(1, 0, 2, 3).unsqueeze(0)  # (B, C, T, H, W)
 
+            goal_video = torch.stack([goal_tensor, goal_tensor], dim=0)  # (T, C, H, W)
+            goal_video = goal_video.permute(1, 0, 2, 3).unsqueeze(0)  # (B, C, T, H, W)
+
+            # Move to device
             current_video = current_video.to(device=self.device, dtype=self.dtype)
             goal_video = goal_video.to(device=self.device, dtype=self.dtype)
 
             # Encode separately
             current_emb = encoder(current_video)  # (1, num_patches, embed_dim)
-            goal_emb = encoder(goal_video)
+            goal_emb = encoder(goal_video)  # (1, num_patches, embed_dim)
 
             # Store full embeddings for predictor use
             self._embedding_cache["current_patches"] = current_emb
@@ -636,16 +645,21 @@ class VJEPA2Inference:
         actions_t = torch.from_numpy(actions).float().to(self.device)
 
         # Expand current patches to batch size
-        # current_patches shape: (1, num_patches, embed_dim)
-        x = current_patches.expand(num_samples, -1, -1)  # (num_samples, num_patches, embed_dim)
+        # current_patches shape: (1, num_patches, embed_dim) where num_patches = T*(H*W) = 1*256 = 256
+        # T=1 since we encode single frames separately
+        x = current_patches.expand(num_samples, -1, -1)  # (num_samples, num_patches=T*H*W, embed_dim)
 
-        # For AC predictor, actions shape should be (B, 7)
-        # States (end-effector state) - use zeros as default
-        states = torch.zeros(num_samples, self.ACTION_DIM_AC, device=self.device, dtype=self.dtype)
+        # For AC predictor, actions and states need temporal dimension (B, T, action_dim)
+        # We encoded single frames (T=1), so actions/states should be (B, T=1, 7)
+        # Add temporal dimension and ensure dtype matches
+        actions_expanded = actions_t.unsqueeze(1).to(dtype=x.dtype)  # (B, 1, 7) with matching dtype
+
+        # States (end-effector state) - use zeros with temporal dimension and matching dtype
+        states = torch.zeros(num_samples, 1, self.ACTION_DIM_AC, device=self.device, dtype=x.dtype)  # (B, T=1, 7)
 
         # Run predictor to get predicted future embeddings
         # predictor(x, actions, states) -> predicted embeddings
-        predicted = predictor(x, actions_t.to(self.dtype), states)  # (num_samples, num_patches, embed_dim)
+        predicted = predictor(x, actions_expanded, states)  # (num_samples, num_patches, embed_dim)
 
         # Compute L1 distance between predicted and goal embeddings
         # Average over patches and embedding dimensions

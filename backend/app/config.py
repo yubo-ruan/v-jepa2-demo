@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     # Storage
     upload_dir: str = "./data/uploads"
     model_cache_dir: str = "./data/models"
+    checkpoint_dir: str = "./data/models/checkpoints"
 
     # Upload settings
     max_upload_size_mb: int = 10
@@ -33,6 +34,10 @@ class Settings(BaseSettings):
     # Inference settings
     use_fp16: bool = True  # Use FP16 for memory efficiency
     max_batch_size: int = 1  # Conservative for 16GB
+
+    # Checkpointing settings
+    enable_checkpointing: bool = True  # Enable disk-based model checkpointing
+    checkpoint_max_age_days: int = 30  # Auto-delete checkpoints older than 30 days
 
     class Config:
         env_file = ".env"

@@ -57,6 +57,11 @@ build/
 *.onnx
 *.safetensors
 
+# Model checkpoints (disk-based persistence)
+backend/data/models/checkpoints/*.pt
+backend/data/models/checkpoints/*.tmp
+backend/data/models/checkpoints/*.meta.json
+
 # Logs
 *.log
 logs/

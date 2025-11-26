@@ -8,6 +8,9 @@ import logging
 import os
 import time
 import threading
+import json
+import hashlib
+import shutil
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict, Any, Callable
 from pathlib import Path
@@ -300,6 +303,14 @@ class VJEPA2ModelLoader:
 
             start_time = time.time()
 
+            # Try loading from checkpoint first (much faster)
+            if self._load_checkpoint(model_id):
+                logger.info(f"✅ Model {model_id} loaded from checkpoint")
+                return self._encoder
+
+            # Fallback to PyTorch Hub if checkpoint load failed
+            logger.info(f"Loading {model_id} from PyTorch Hub...")
+
             try:
                 # Load from PyTorch Hub - returns (encoder, predictor) tuple
                 result = torch.hub.load(
@@ -353,6 +364,9 @@ class VJEPA2ModelLoader:
                     logger.info(f"AC Predictor loaded ({pred_params/1e6:.1f}M params)")
                 else:
                     self._predictor = predictor  # Keep reference but don't load to GPU
+
+                # Save checkpoint for faster future loads
+                self._save_checkpoint(model_id)
 
                 return encoder
 
@@ -421,6 +435,238 @@ class VJEPA2ModelLoader:
         if checkpoint_file:
             return (hub_dir / checkpoint_file).exists()
         return False
+
+    def _get_checkpoint_path(self, model_id: str) -> Path:
+        """Get the checkpoint file path for a model."""
+        from app.config import settings
+        checkpoint_dir = Path(settings.checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        return checkpoint_dir / f"{model_id}.pt"
+
+    def _get_checkpoint_meta_path(self, model_id: str) -> Path:
+        """Get the checkpoint metadata file path for a model."""
+        from app.config import settings
+        checkpoint_dir = Path(settings.checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        return checkpoint_dir / f"{model_id}.meta.json"
+
+    def _validate_checkpoint(self, model_id: str) -> bool:
+        """
+        Validate a checkpoint file for integrity and compatibility.
+
+        Returns:
+            True if checkpoint is valid and can be loaded
+        """
+        checkpoint_path = self._get_checkpoint_path(model_id)
+        meta_path = self._get_checkpoint_meta_path(model_id)
+
+        # Check if both files exist
+        if not checkpoint_path.exists() or not meta_path.exists():
+            return False
+
+        try:
+            # Load metadata
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+
+            # Validate PyTorch version compatibility (major.minor)
+            saved_version = meta.get("pytorch_version", "0.0.0")
+            current_version = torch.__version__.split("+")[0]  # Remove build info
+            saved_major_minor = ".".join(saved_version.split(".")[:2])
+            current_major_minor = ".".join(current_version.split(".")[:2])
+
+            if saved_major_minor != current_major_minor:
+                logger.warning(
+                    f"Checkpoint PyTorch version mismatch: saved={saved_version}, "
+                    f"current={current_version}. Will reload from PyTorch Hub."
+                )
+                return False
+
+            # Validate checksum
+            expected_checksum = meta.get("checksum", "")
+            if expected_checksum:
+                sha256_hash = hashlib.sha256()
+                with open(checkpoint_path, "rb") as f:
+                    # Read in chunks to handle large files
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        sha256_hash.update(chunk)
+                actual_checksum = f"sha256:{sha256_hash.hexdigest()}"
+
+                if actual_checksum != expected_checksum:
+                    logger.error(f"Checkpoint {model_id} corrupted (checksum mismatch)")
+                    return False
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"Failed to validate checkpoint {model_id}: {e}")
+            return False
+
+    def _save_checkpoint(self, model_id: str) -> bool:
+        """
+        Save the currently loaded model to a checkpoint file.
+
+        Uses atomic writes (tmp file + rename) to prevent corruption.
+        Saves to CPU for device-agnostic loading.
+
+        Returns:
+            True if checkpoint was saved successfully
+        """
+        from app.config import settings
+
+        # Check if checkpointing is enabled
+        if not settings.enable_checkpointing:
+            logger.debug("Checkpointing disabled, skipping save")
+            return False
+
+        if self._encoder is None:
+            logger.warning("No model loaded, cannot save checkpoint")
+            return False
+
+        checkpoint_path = self._get_checkpoint_path(model_id)
+        meta_path = self._get_checkpoint_meta_path(model_id)
+        tmp_checkpoint_path = checkpoint_path.with_suffix(".tmp")
+
+        try:
+            logger.info(f"Saving checkpoint for {model_id} to {checkpoint_path}...")
+            start_time = time.time()
+
+            # Prepare checkpoint data (move to CPU for device-agnostic storage)
+            checkpoint = {
+                "encoder_state_dict": {k: v.cpu() for k, v in self._encoder.state_dict().items()},
+                "model_id": model_id,
+                "pytorch_version": torch.__version__.split("+")[0],
+                "device_type": self.device_info.device_type,
+                "dtype": str(self._get_torch_dtype()),
+                "timestamp": time.time(),
+                "hub_name": self.MODEL_HUB_NAMES.get(model_id, "unknown"),
+            }
+
+            # For AC models, also save predictor
+            if model_id in self.AC_MODELS and self._predictor is not None:
+                checkpoint["predictor_state_dict"] = {
+                    k: v.cpu() for k, v in self._predictor.state_dict().items()
+                }
+
+            # Write to temporary file first (atomic write)
+            torch.save(checkpoint, tmp_checkpoint_path)
+
+            # Calculate checksum
+            sha256_hash = hashlib.sha256()
+            with open(tmp_checkpoint_path, "rb") as f:
+                for chunk in iter(lambda: f.read(8192), b""):
+                    sha256_hash.update(chunk)
+            checksum = f"sha256:{sha256_hash.hexdigest()}"
+
+            # Create metadata
+            metadata = {
+                "model_id": model_id,
+                "pytorch_version": checkpoint["pytorch_version"],
+                "device_type": checkpoint["device_type"],
+                "dtype": checkpoint["dtype"],
+                "timestamp": checkpoint["timestamp"],
+                "hub_name": checkpoint["hub_name"],
+                "checksum": checksum,
+                "has_predictor": "predictor_state_dict" in checkpoint,
+            }
+
+            # Write metadata
+            with open(meta_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            # Atomic rename (tmp -> final)
+            shutil.move(str(tmp_checkpoint_path), str(checkpoint_path))
+
+            elapsed = time.time() - start_time
+            size_mb = checkpoint_path.stat().st_size / (1024 ** 2)
+            logger.info(f"Checkpoint saved in {elapsed:.1f}s ({size_mb:.1f}MB)")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save checkpoint: {e}", exc_info=True)
+            # Clean up tmp file if it exists
+            if tmp_checkpoint_path.exists():
+                tmp_checkpoint_path.unlink()
+            return False
+
+    def _load_checkpoint(self, model_id: str) -> bool:
+        """
+        Load a model from checkpoint file.
+
+        Returns:
+            True if checkpoint was loaded successfully
+        """
+        checkpoint_path = self._get_checkpoint_path(model_id)
+
+        if not self._validate_checkpoint(model_id):
+            return False
+
+        try:
+            logger.info(f"Loading checkpoint for {model_id} from {checkpoint_path}...")
+            start_time = time.time()
+
+            # Load checkpoint (map to CPU first, then move to target device)
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+            # Load from PyTorch Hub to get model architecture (but we'll overwrite weights)
+            hub_name = self.MODEL_HUB_NAMES[model_id]
+            result = torch.hub.load(
+                'facebookresearch/vjepa2',
+                hub_name,
+                pretrained=False,  # Don't download weights, we have checkpoint
+                trust_repo=True,
+            )
+            encoder, predictor = result
+
+            # Load state dicts
+            encoder.load_state_dict(checkpoint["encoder_state_dict"])
+
+            # Move to device and set dtype
+            dtype = self._get_torch_dtype()
+            encoder = encoder.to(device=self.device)
+            if dtype == torch.float16:
+                encoder = encoder.half()
+                for module in encoder.modules():
+                    if hasattr(module, 'half'):
+                        module.half()
+            encoder.eval()
+
+            # Disable gradients
+            for param in encoder.parameters():
+                param.requires_grad = False
+
+            self._encoder = encoder
+            self._loaded_model_id = model_id
+
+            # Load predictor for AC models
+            if model_id in self.AC_MODELS and "predictor_state_dict" in checkpoint:
+                predictor.load_state_dict(checkpoint["predictor_state_dict"])
+                predictor = predictor.to(device=self.device)
+                if dtype == torch.float16:
+                    predictor = predictor.half()
+                    for module in predictor.modules():
+                        if hasattr(module, 'half'):
+                            module.half()
+                predictor.eval()
+                for param in predictor.parameters():
+                    param.requires_grad = False
+                self._predictor = predictor
+            else:
+                self._predictor = predictor
+
+            elapsed = time.time() - start_time
+            logger.info(f"✅ Model loaded from checkpoint in {elapsed:.1f}s")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint: {e}", exc_info=True)
+            # Clean up partial state
+            self._encoder = None
+            self._predictor = None
+            self._loaded_model_id = None
+            return False
 
 
 class VJEPA2Inference:

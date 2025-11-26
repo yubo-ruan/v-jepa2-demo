@@ -18,6 +18,9 @@ interface ExtendedPlanningState extends PlanningState {
   // Track planning start time for history
   planningStartTime: number | null;
   planningModel: string | null;
+  // Track previous images to detect changes
+  previousCurrentImage: string | null;
+  previousGoalImage: string | null;
 }
 
 interface PlanningContextType {
@@ -139,6 +142,8 @@ const DEFAULT_STATE: ExtendedPlanningState = {
   goalImageUploadId: null,
   planningStartTime: null,
   planningModel: null,
+  previousCurrentImage: null,
+  previousGoalImage: null,
 };
 
 export function PlanningProvider({ children }: { children: ReactNode }) {
@@ -202,7 +207,7 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const startPlanning = useCallback(async (model: string) => {
-    const { currentImage, goalImage, samples, iterations, currentImageUploadId, goalImageUploadId } = planningState;
+    const { currentImage, goalImage, samples, iterations, currentImageUploadId, goalImageUploadId, previousCurrentImage, previousGoalImage } = planningState;
 
     if (!currentImage || !goalImage) {
       return;
@@ -233,16 +238,27 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       let currentUploadId = currentImageUploadId;
       let goalUploadId = goalImageUploadId;
 
+      // Check if images have changed from previous planning run
+      const currentImageChanged = currentImage !== previousCurrentImage;
+      const goalImageChanged = goalImage !== previousGoalImage;
+
       console.log('[PlanningContext] Starting planning with images:', {
         currentImage: currentImage?.substring(0, 50),
         goalImage: goalImage?.substring(0, 50),
         currentUploadId,
         goalUploadId,
+        currentImageChanged,
+        goalImageChanged,
       });
 
-      // Upload current image if it's a blob URL (always re-upload to ensure it exists on backend)
-      if (currentImage.startsWith("blob:")) {
-        console.log('[PlanningContext] Uploading current image blob...');
+      // Upload current image only if:
+      // 1. No cached upload ID exists, OR
+      // 2. Image has changed from previous run
+      if (currentImage.startsWith("blob:") && (!currentUploadId || currentImageChanged)) {
+        console.log('[PlanningContext] Uploading current image blob...', {
+          hasUploadId: !!currentUploadId,
+          imageChanged: currentImageChanged
+        });
         try {
           const response = await fetch(currentImage);
           if (!response.ok) {
@@ -258,11 +274,18 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
           console.error('[PlanningContext] Failed to upload current image:', error);
           throw new Error("Current image is no longer available. Please re-upload the image.");
         }
+      } else if (currentUploadId && !currentImageChanged) {
+        console.log('[PlanningContext] Reusing cached current image upload ID:', currentUploadId);
       }
 
-      // Upload goal image if it's a blob URL (always re-upload to ensure it exists on backend)
-      if (goalImage.startsWith("blob:")) {
-        console.log('[PlanningContext] Uploading goal image blob...');
+      // Upload goal image only if:
+      // 1. No cached upload ID exists, OR
+      // 2. Image has changed from previous run
+      if (goalImage.startsWith("blob:") && (!goalUploadId || goalImageChanged)) {
+        console.log('[PlanningContext] Uploading goal image blob...', {
+          hasUploadId: !!goalUploadId,
+          imageChanged: goalImageChanged
+        });
         try {
           const response = await fetch(goalImage);
           if (!response.ok) {
@@ -278,6 +301,8 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
           console.error('[PlanningContext] Failed to upload goal image:', error);
           throw new Error("Goal image is no longer available. Please re-upload the image.");
         }
+      } else if (goalUploadId && !goalImageChanged) {
+        console.log('[PlanningContext] Reusing cached goal image upload ID:', goalUploadId);
       }
 
       // Use upload IDs for planning (must be upload IDs, not blob URLs)
@@ -300,7 +325,13 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
         iterations,
       });
 
-      setPlanningState((prev) => ({ ...prev, taskId }));
+      // Update task ID and track current images for next run
+      setPlanningState((prev) => ({
+        ...prev,
+        taskId,
+        previousCurrentImage: currentImage,
+        previousGoalImage: goalImage,
+      }));
 
       // Subscribe to WebSocket for real-time progress
       console.log('[PlanningContext] Subscribing to WebSocket for task:', taskId);

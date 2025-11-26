@@ -439,6 +439,10 @@ class PlannerService:
             energy=cem_result["energy"],
             energy_history=cem_result["energy_history"],
             is_ac_model=cem_result.get("is_ac_model", False),
+            # Validation fields
+            energy_threshold=cem_result.get("energy_threshold", 3.0),
+            passes_threshold=cem_result.get("passes_threshold", False),
+            normalized_distance=cem_result.get("normalized_distance", 0.0),
         )
 
         task.result = result

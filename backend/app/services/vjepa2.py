@@ -1270,6 +1270,11 @@ class VJEPA2Inference:
                 0.5 * energy_confidence + 0.3 + convergence_bonus - stability_penalty
             ))
 
+            # Validation threshold check
+            ENERGY_THRESHOLD = 3.0  # Raw energy threshold (tune based on observations)
+            normalized_distance = min(1.0, best_energy / 10.0)  # Normalize to 0-1
+            passes_threshold = best_energy < ENERGY_THRESHOLD
+
             return {
                 "action": [round(float(x), 4) for x in best_action],
                 "confidence": round(confidence, 3),
@@ -1281,6 +1286,10 @@ class VJEPA2Inference:
                 "model": self.loader._loaded_model_id,
                 "device": self.loader.device_info.device_type,
                 "is_ac_model": is_ac,
+                # NEW: Validation fields
+                "energy_threshold": ENERGY_THRESHOLD,
+                "passes_threshold": passes_threshold,
+                "normalized_distance": round(normalized_distance, 3),
             }
         finally:
             # Always clear per-request caches to prevent memory buildup

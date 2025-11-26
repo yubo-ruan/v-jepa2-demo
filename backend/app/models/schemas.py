@@ -31,6 +31,7 @@ class PlanningProgress(BaseModel):
     iteration: int = 0
     total_iterations: int = 0
     best_energy: float = 0.0
+    energy_history: List[float] = []  # Energy values per iteration for live chart updates
     samples_evaluated: int = 0
     elapsed_seconds: float = 0.0
     eta_seconds: float = 0.0
@@ -43,6 +44,11 @@ class ActionResult(BaseModel):
     energy: float
     energy_history: List[float] = []
     is_ac_model: bool = False  # True if action-conditioned predictor was used
+
+    # Validation threshold check
+    energy_threshold: float = 3.0  # Default threshold
+    passes_threshold: bool = False  # True if energy < threshold
+    normalized_distance: float = 0.0  # Energy normalized to 0-1 scale
 
 
 class PlanningTaskResponse(BaseModel):

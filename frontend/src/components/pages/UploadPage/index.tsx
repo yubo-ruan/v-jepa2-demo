@@ -17,9 +17,11 @@ import {
   AlertIcon,
 } from "@/components/icons";
 import { EnergyLandscape, IterationReplay } from "@/components/visualizations";
+import { PlanningResultValidation } from "@/components/visualizations/PlanningResultValidation";
 import { styles, Spinner, Modal, focusRing } from "@/components/ui";
 import { usePlanning, useToast, useModels } from "@/contexts";
 import { planningPresets, config } from "@/constants";
+import { ACTION_DISPLAY_SCALING, ACTION_LABELS, ACTION_COLORS } from "@/constants/actionDisplay";
 
 interface UploadPageProps {
   onGoToConfig: () => void;
@@ -182,12 +184,17 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
 
   // Use real energy history from result, or build from progress updates
   const convergenceData = useMemo(() => {
+    // Priority 1: Completed result
     if (result?.energyHistory && result.energyHistory.length > 0) {
       return result.energyHistory;
     }
-    // Default mock data for display
+    // Priority 2: Live progress updates
+    if (progress?.energyHistory && progress.energyHistory.length > 0) {
+      return progress.energyHistory;
+    }
+    // Fallback: mock data
     return [8, 6.5, 5.2, 4.1, 3.5, 3.1, 2.8, 2.6, 2.5, 2.45];
-  }, [result?.energyHistory]);
+  }, [result?.energyHistory, progress?.energyHistory]);
 
   const getBarColor = (progressRatio: number) => {
     if (progressRatio < 0.5) return "from-red-500 to-orange-400";
@@ -492,122 +499,12 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
       <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6 mb-8">
         <h3 className="text-base font-semibold text-zinc-300 mb-5">Progress Dashboard</h3>
 
-        {isProcessing && progress?.status === "loading_model" ? (
-          /* Loading Model State */
-          <div className="flex flex-col items-center justify-center py-8 text-center animate-in fade-in duration-300">
-            <div className="w-16 h-16 rounded-full bg-indigo-500/10 flex items-center justify-center mb-4">
-              <Spinner size="lg" />
-            </div>
-            <p className="text-indigo-400 font-medium mb-2">Loading Model</p>
-            <p className="text-zinc-400 text-sm mb-4">
-              {progress.modelLoading ? `Loading ${progress.modelLoading}...` : "Preparing model..."}
-            </p>
-
-            {/* Determine loading stage */}
-            {(() => {
-              const isDownloading = progress.downloadProgress !== undefined && progress.downloadProgress > 0 && progress.downloadProgress < 1;
-              const isLoadingToGpu = progress.downloadProgress === 1 || (progress.downloadDownloadedGb !== undefined && progress.downloadTotalGb !== undefined && progress.downloadDownloadedGb >= progress.downloadTotalGb);
-
-              if (isDownloading) {
-                // Downloading from internet
-                return (
-                  <>
-                    <p className="text-zinc-500 text-xs max-w-xs mb-4">
-                      Downloading model checkpoint from the internet...
-                    </p>
-                    <div className="w-full max-w-xs">
-                      <div className="flex justify-between text-xs mb-1">
-                        <span className="text-zinc-500">Downloading</span>
-                        <span className="text-zinc-400">{Math.round((progress.downloadProgress || 0) * 100)}%</span>
-                      </div>
-                      <div className="h-2 bg-zinc-700 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-gradient-to-r from-indigo-600 to-purple-500 rounded-full transition-all"
-                          style={{ width: `${(progress.downloadProgress || 0) * 100}%` }}
-                        />
-                      </div>
-                      {/* Size and speed info */}
-                      <div className="flex justify-between text-xs mt-2">
-                        {progress.downloadDownloadedGb !== undefined && progress.downloadTotalGb !== undefined ? (
-                          <span className="text-zinc-500">
-                            {progress.downloadDownloadedGb.toFixed(2)} / {progress.downloadTotalGb.toFixed(2)} GB
-                          </span>
-                        ) : progress.downloadTotalGb !== undefined ? (
-                          <span className="text-zinc-500">
-                            {progress.downloadTotalGb.toFixed(1)} GB total
-                          </span>
-                        ) : (
-                          <span className="text-zinc-500">—</span>
-                        )}
-                        {progress.downloadSpeedMbps !== undefined && progress.downloadSpeedMbps > 0 && (
-                          <span className="text-zinc-500">
-                            {progress.downloadSpeedMbps.toFixed(1)} MB/s
-                          </span>
-                        )}
-                      </div>
-                      {/* ETA info */}
-                      {progress.downloadEtaSeconds !== undefined && progress.downloadEtaSeconds > 0 && (
-                        <p className="text-center text-xs text-amber-400 mt-2">
-                          ~{formatTime(progress.downloadEtaSeconds)} remaining
-                        </p>
-                      )}
-                    </div>
-                  </>
-                );
-              } else if (isLoadingToGpu) {
-                // Loading cached model to GPU
-                return (
-                  <>
-                    <div className="w-full max-w-xs">
-                      <div className="flex justify-between text-xs mb-1">
-                        <span className="text-zinc-500">Loading to GPU memory</span>
-                        <span className="text-emerald-400">Cached ✓</span>
-                      </div>
-                      <div className="h-2 bg-zinc-700 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-emerald-600 to-teal-500 rounded-full animate-pulse w-full" />
-                      </div>
-                      {progress.downloadTotalGb !== undefined && (
-                        <p className="text-center text-xs text-zinc-500 mt-2">
-                          {progress.downloadTotalGb.toFixed(1)} GB → GPU memory
-                        </p>
-                      )}
-                    </div>
-                    <p className="text-zinc-500 text-xs mt-3 max-w-xs">
-                      Model is cached locally. Loading into GPU memory...
-                    </p>
-                  </>
-                );
-              } else {
-                // Initial state / preparing
-                return (
-                  <>
-                    <p className="text-zinc-500 text-xs max-w-xs">
-                      This may take a few minutes if the model needs to be downloaded for the first time.
-                    </p>
-                    {progress.downloadTotalGb !== undefined && (
-                      <p className="text-zinc-500 text-xs mt-4">
-                        Model size: {progress.downloadTotalGb.toFixed(1)} GB
-                      </p>
-                    )}
-                  </>
-                );
-              }
-            })()}
-
-            <button
-              onClick={cancelPlanning}
-              className="mt-6 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-all text-sm flex items-center gap-2"
-            >
-              <StopIcon />
-              Cancel
-            </button>
-          </div>
-        ) : isProcessing ? (
+        {isProcessing || hasResults ? (
           <>
             {/* Progress Bar */}
             <div className="mb-5">
               <div className="flex justify-between text-sm mb-2">
-                <span className="text-zinc-300 font-medium">Processing</span>
+                <span className="text-zinc-300 font-medium">{hasResults ? "Completed" : "Processing"}</span>
                 <span className="text-indigo-400 font-medium">{progressPercent}%</span>
               </div>
               <div className="h-3 bg-zinc-700 rounded-full overflow-hidden">
@@ -627,28 +524,37 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               </div>
               <div className="bg-zinc-900 rounded-lg p-4">
                 <p className="text-xs text-zinc-500 mb-1">ETA</p>
-                <p className="text-xl font-semibold text-zinc-200">~{formatTime(progress?.etaSeconds ?? 0)}</p>
+                <p className="text-xl font-semibold text-zinc-200">{hasResults ? "—" : `~${formatTime(progress?.etaSeconds ?? 0)}`}</p>
               </div>
             </div>
 
             {/* Energy Display */}
             <div className="bg-zinc-900 rounded-lg p-4 mb-5">
-              <div className="flex justify-between items-center mb-3">
-                <p className="text-sm text-zinc-400">Best Energy</p>
-                <p className="text-lg font-semibold text-green-400">{progress?.bestEnergy?.toFixed(2) ?? "—"}</p>
+              <div className="flex justify-between items-center mb-3 gap-3">
+                <p className="text-sm text-zinc-400 flex-shrink-0">Best Energy</p>
+                <p className="text-lg font-semibold text-green-400 tabular-nums">{progress?.bestEnergy?.toFixed(2) ?? "—"}</p>
               </div>
               {/* Mini Convergence Chart with gradient colors */}
               <div className="h-20 flex items-end gap-1">
-                {convergenceData.map((val, i, arr) => {
-                  const progress = i / (arr.length - 1);
-                  return (
-                    <div
-                      key={i}
-                      className={`flex-1 bg-gradient-to-t ${getBarColor(progress)} rounded-t opacity-90 transition-all duration-500`}
-                      style={{ height: `${(val / 8) * 100}%` }}
-                    />
-                  );
-                })}
+                {(() => {
+                  const maxEnergy = Math.max(...convergenceData, 0.1);
+                  const minEnergy = Math.min(...convergenceData, maxEnergy);
+                  const range = maxEnergy - minEnergy;
+                  // Add 20% padding to top for better visualization
+                  const scale = range > 0 ? range * 1.2 : maxEnergy;
+
+                  return convergenceData.map((val, i, arr) => {
+                    const progress = i / (arr.length - 1);
+                    const heightPercent = scale > 0 ? ((val - minEnergy) / scale) * 100 : 10;
+                    return (
+                      <div
+                        key={i}
+                        className={`flex-1 bg-gradient-to-t ${getBarColor(progress)} rounded-t opacity-90 transition-all duration-500`}
+                        style={{ height: `${Math.max(heightPercent, 2)}%` }}
+                      />
+                    );
+                  });
+                })()}
               </div>
               <div className="flex justify-between text-xs text-zinc-600 mt-2">
                 <span>Iter 1</span>
@@ -656,16 +562,18 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               </div>
             </div>
 
-            {/* Control Button */}
-            <div className="flex gap-3">
-              <button
-                onClick={cancelPlanning}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-all text-sm font-medium hover:scale-[1.02] active:scale-[0.98]"
-              >
-                <StopIcon />
-                Cancel
-              </button>
-            </div>
+            {/* Control Button - only show when processing */}
+            {isProcessing && (
+              <div className="flex gap-3">
+                <button
+                  onClick={cancelPlanning}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-all text-sm font-medium hover:scale-[1.02] active:scale-[0.98]"
+                >
+                  <StopIcon />
+                  Cancel
+                </button>
+              </div>
+            )}
           </>
         ) : error ? (
           <div className="flex flex-col items-center justify-center py-8 text-center animate-in fade-in duration-300">
@@ -731,14 +639,46 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
         </div>
       )}
 
+      {/* Planning Result Validation */}
+      {hasResults && result && currentImage && goalImage && (
+        <div className="mb-8">
+          <PlanningResultValidation
+            currentImage={currentImage}
+            goalImage={goalImage}
+            action={result.action}
+            confidence={result.confidence}
+            energy={result.energy}
+            energyThreshold={result.energyThreshold}
+            passesThreshold={result.passesThreshold}
+            normalizedDistance={result.normalizedDistance}
+            isAcModel={result.isAcModel}
+          />
+        </div>
+      )}
+
       {/* Results Display */}
       <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
         <h3 className="text-base font-semibold text-zinc-300 mb-5">Results Display</h3>
 
         {hasResults ? (
-          <div className="flex flex-col lg:flex-row gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-            {/* 3D Arrow Visual */}
-            <div className="w-full lg:w-56 h-56 bg-zinc-900 rounded-xl border border-zinc-600 flex items-center justify-center relative overflow-hidden shrink-0">
+          (() => {
+            // Calculate arrow rotation from action vector [x, y, z]
+            const calculateArrowAngle = (action: number[]) => {
+              if (!action || action.length < 2) return 45; // default
+              const x = action[0];
+              const y = action[1];
+              // Calculate angle in degrees (0° = right, 90° = up)
+              const angle = Math.atan2(-y, x) * (180 / Math.PI);
+              return angle;
+            };
+
+            const arrowAngle = result?.action ? calculateArrowAngle(result.action) : 45;
+            const arrowLength = 40; // Fixed length for now
+
+            return (
+              <div className="flex flex-col lg:flex-row gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                {/* 3D Arrow Visual */}
+                <div className="w-full lg:w-56 h-56 bg-zinc-900 rounded-xl border border-zinc-600 flex items-center justify-center relative overflow-hidden shrink-0">
               {/* Grid background */}
               <div className="absolute inset-0 opacity-20">
                 <svg className="w-full h-full" xmlns="http://www.w3.org/2000/svg">
@@ -751,21 +691,43 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
                 </svg>
               </div>
               {/* 3D Arrow */}
-              <svg className="w-28 h-28 text-blue-500" viewBox="0 0 100 100">
+              <svg className="w-28 h-28" viewBox="0 0 100 100">
                 <defs>
-                  <linearGradient id="arrowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor="#6366f1" />
-                    <stop offset="100%" stopColor="#a855f7" />
+                  <linearGradient id="arrowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" stopColor="#3b82f6" />
+                    <stop offset="100%" stopColor="#8b5cf6" />
                   </linearGradient>
                 </defs>
-                {/* Arrow body */}
-                <line x1="30" y1="70" x2="70" y2="30" stroke="url(#arrowGrad)" strokeWidth="4" strokeLinecap="round" />
-                {/* Arrow head */}
-                <polygon points="70,30 55,35 65,45" fill="url(#arrowGrad)" />
-                {/* X axis indicator */}
-                <line x1="30" y1="70" x2="55" y2="70" stroke="#ef4444" strokeWidth="2" strokeDasharray="4,2" opacity="0.6" />
-                {/* Y axis indicator */}
-                <line x1="70" y1="30" x2="70" y2="55" stroke="#22c55e" strokeWidth="2" strokeDasharray="4,2" opacity="0.6" />
+
+                {/* Center point */}
+                <circle cx="50" cy="50" r="2" fill="#666" />
+
+                {/* Dynamic arrow */}
+                <g transform={`rotate(${arrowAngle} 50 50)`}>
+                  {/* Arrow line */}
+                  <line
+                    x1="50"
+                    y1="50"
+                    x2={50 + arrowLength}
+                    y2="50"
+                    stroke="url(#arrowGrad)"
+                    strokeWidth="4"
+                    strokeLinecap="round"
+                  />
+                  {/* Arrow head */}
+                  <polygon
+                    points={`${50 + arrowLength},50 ${50 + arrowLength - 8},45 ${50 + arrowLength - 8},55`}
+                    fill="url(#arrowGrad)"
+                  />
+                </g>
+
+                {/* X axis reference (red) */}
+                <line x1="50" y1="50" x2="80" y2="50" stroke="#ef4444" strokeWidth="1" strokeDasharray="2,2" opacity="0.4" />
+                <text x="82" y="54" fontSize="8" fill="#ef4444" opacity="0.6">X</text>
+
+                {/* Y axis reference (green) */}
+                <line x1="50" y1="50" x2="50" y2="20" stroke="#22c55e" strokeWidth="1" strokeDasharray="2,2" opacity="0.4" />
+                <text x="52" y="18" fontSize="8" fill="#22c55e" opacity="0.6">Y</text>
               </svg>
               <span className="absolute bottom-3 left-3 text-xs text-zinc-500 font-medium">Optimal Action</span>
             </div>
@@ -775,40 +737,75 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               {/* Coordinates - 3D or 7D based on model type */}
               {result?.isAcModel ? (
                 // 7D DROID action format
-                <div className="space-y-3">
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
-                      <p className="text-xs text-red-400 mb-1 font-medium">X</p>
-                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[0]?.toFixed(3) ?? "0"}</p>
-                    </div>
-                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
-                      <p className="text-xs text-green-400 mb-1 font-medium">Y</p>
-                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[1]?.toFixed(3) ?? "0"}</p>
-                    </div>
-                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
-                      <p className="text-xs text-blue-400 mb-1 font-medium">Z</p>
-                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[2]?.toFixed(3) ?? "0"}</p>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-4 gap-3">
-                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
-                      <p className="text-xs text-amber-400 mb-1 font-medium">Roll</p>
-                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[3]?.toFixed(3) ?? "0"}</p>
-                    </div>
-                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
-                      <p className="text-xs text-purple-400 mb-1 font-medium">Pitch</p>
-                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[4]?.toFixed(3) ?? "0"}</p>
-                    </div>
-                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
-                      <p className="text-xs text-cyan-400 mb-1 font-medium">Yaw</p>
-                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[5]?.toFixed(3) ?? "0"}</p>
-                    </div>
-                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
-                      <p className="text-xs text-pink-400 mb-1 font-medium">Gripper</p>
-                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[6]?.toFixed(3) ?? "0"}</p>
+                <div className="space-y-4">
+                  {/* Position Section */}
+                  <div>
+                    <p className="text-xs text-zinc-400 mb-2 font-medium">Position (cm)</p>
+                    <div className="grid grid-cols-3 gap-3">
+                      {ACTION_LABELS.POSITION.map((label, i) => {
+                        const value = ((result?.action[i] ?? 0) * ACTION_DISPLAY_SCALING.POSITION_TO_CM).toFixed(1);
+                        const color = ACTION_COLORS.POSITION[i];
+                        return (
+                          <div key={label} className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
+                            <p className={`text-xs text-${color}-400 mb-1 font-medium`}>{label}</p>
+                            <p className="text-lg font-mono font-semibold text-zinc-200">
+                              {value} <span className="text-xs text-zinc-500">cm</span>
+                            </p>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
-                  <p className="text-xs text-zinc-500 text-center">7D DROID Action Format</p>
+
+                  {/* Orientation Section */}
+                  <div>
+                    <p className="text-xs text-zinc-400 mb-2 font-medium">Orientation (deg)</p>
+                    <div className="grid grid-cols-3 gap-3">
+                      {ACTION_LABELS.ROTATION.map((label, i) => {
+                        const value = ((result?.action[i + 3] ?? 0) * ACTION_DISPLAY_SCALING.ROTATION_TO_DEG).toFixed(1);
+                        const color = ACTION_COLORS.ROTATION[i];
+                        return (
+                          <div key={label} className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
+                            <p className={`text-xs text-${color}-400 mb-1 font-medium`}>{label}</p>
+                            <p className="text-lg font-mono font-semibold text-zinc-200">
+                              {value}<span className="text-xs text-zinc-500">°</span>
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Gripper Section */}
+                  <div>
+                    <p className="text-xs text-zinc-400 mb-2 font-medium">Gripper</p>
+                    <div className="bg-zinc-900 rounded-lg p-4">
+                      {(() => {
+                        const gripperValue = result?.action[6] ?? 0;
+                        const gripperPercent = Math.max(0, Math.min(100,
+                          ((gripperValue - ACTION_DISPLAY_SCALING.GRIPPER_MIN) /
+                           (ACTION_DISPLAY_SCALING.GRIPPER_MAX - ACTION_DISPLAY_SCALING.GRIPPER_MIN)) * 100
+                        ));
+                        return (
+                          <>
+                            <div className="flex justify-between mb-2">
+                              <p className="text-xs text-pink-400 font-medium">{ACTION_LABELS.GRIPPER}</p>
+                              <p className="text-sm font-mono font-semibold text-zinc-200">{gripperPercent.toFixed(0)}%</p>
+                            </div>
+                            <div className="w-full bg-zinc-800 rounded-full h-2 overflow-hidden">
+                              <div
+                                className="h-full bg-gradient-to-r from-pink-500 to-pink-400 transition-all duration-300"
+                                style={{ width: `${gripperPercent}%` }}
+                              />
+                            </div>
+                            <p className="text-xs text-zinc-500 mt-2 text-center">
+                              {gripperPercent > 50 ? 'Open' : 'Closed'}
+                            </p>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </div>
                 </div>
               ) : (
                 // Standard 3D action
@@ -883,6 +880,8 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               />
             </div>
           </div>
+            );
+          })()
         ) : (
           <div className="flex flex-col items-center justify-center py-12 text-center">
             <div className="w-16 h-16 rounded-full bg-zinc-900 flex items-center justify-center mb-4">
@@ -956,40 +955,81 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               <div className="bg-zinc-900 rounded-lg p-4">
                 {result.isAcModel ? (
                   // 7D DROID format display
-                  <>
-                    <div className="grid grid-cols-3 gap-4 mb-3">
-                      <div>
-                        <p className="text-xs text-red-400 mb-1">X (position)</p>
-                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[0]?.toFixed(4)}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-green-400 mb-1">Y (position)</p>
-                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[1]?.toFixed(4)}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-blue-400 mb-1">Z (position)</p>
-                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[2]?.toFixed(4)}</p>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-4 gap-4 mb-4">
-                      <div>
-                        <p className="text-xs text-amber-400 mb-1">Roll</p>
-                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[3]?.toFixed(4)}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-purple-400 mb-1">Pitch</p>
-                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[4]?.toFixed(4)}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-cyan-400 mb-1">Yaw</p>
-                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[5]?.toFixed(4)}</p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-pink-400 mb-1">Gripper</p>
-                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[6]?.toFixed(4)}</p>
+                  <div className="space-y-4">
+                    {/* Position Section */}
+                    <div>
+                      <p className="text-xs text-zinc-400 mb-2 font-semibold">Position (cm)</p>
+                      <div className="grid grid-cols-3 gap-4">
+                        {ACTION_LABELS.POSITION.map((label, i) => {
+                          const rawValue = result.action[i] ?? 0;
+                          const displayValue = (rawValue * ACTION_DISPLAY_SCALING.POSITION_TO_CM).toFixed(2);
+                          const color = ACTION_COLORS.POSITION[i];
+                          return (
+                            <div key={label}>
+                              <p className={`text-xs text-${color}-400 mb-1`}>{label}</p>
+                              <p className="text-lg font-mono font-semibold text-zinc-200">
+                                {displayValue} <span className="text-xs text-zinc-500">cm</span>
+                              </p>
+                              <p className="text-xs text-zinc-600 mt-1">raw: {rawValue.toFixed(4)}</p>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
-                  </>
+
+                    {/* Orientation Section */}
+                    <div>
+                      <p className="text-xs text-zinc-400 mb-2 font-semibold">Orientation (deg)</p>
+                      <div className="grid grid-cols-3 gap-4">
+                        {ACTION_LABELS.ROTATION.map((label, i) => {
+                          const rawValue = result.action[i + 3] ?? 0;
+                          const displayValue = (rawValue * ACTION_DISPLAY_SCALING.ROTATION_TO_DEG).toFixed(2);
+                          const color = ACTION_COLORS.ROTATION[i];
+                          return (
+                            <div key={label}>
+                              <p className={`text-xs text-${color}-400 mb-1`}>{label}</p>
+                              <p className="text-lg font-mono font-semibold text-zinc-200">
+                                {displayValue}<span className="text-xs text-zinc-500">°</span>
+                              </p>
+                              <p className="text-xs text-zinc-600 mt-1">raw: {rawValue.toFixed(4)}</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Gripper Section */}
+                    <div>
+                      <p className="text-xs text-zinc-400 mb-2 font-semibold">Gripper</p>
+                      <div className="space-y-3">
+                        {(() => {
+                          const gripperValue = result.action[6] ?? 0;
+                          const gripperPercent = Math.max(0, Math.min(100,
+                            ((gripperValue - ACTION_DISPLAY_SCALING.GRIPPER_MIN) /
+                             (ACTION_DISPLAY_SCALING.GRIPPER_MAX - ACTION_DISPLAY_SCALING.GRIPPER_MIN)) * 100
+                          ));
+                          return (
+                            <>
+                              <div className="flex justify-between items-center">
+                                <p className="text-xs text-pink-400">{ACTION_LABELS.GRIPPER}</p>
+                                <p className="text-lg font-mono font-semibold text-zinc-200">{gripperPercent.toFixed(0)}%</p>
+                              </div>
+                              <div className="w-full bg-zinc-800 rounded-full h-3 overflow-hidden">
+                                <div
+                                  className="h-full bg-gradient-to-r from-pink-500 to-pink-400 transition-all duration-300"
+                                  style={{ width: `${gripperPercent}%` }}
+                                />
+                              </div>
+                              <div className="flex justify-between items-center text-xs">
+                                <p className="text-zinc-500">{gripperPercent > 50 ? 'Open' : 'Closed'}</p>
+                                <p className="text-zinc-600">raw: {gripperValue.toFixed(4)}</p>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  </div>
                 ) : (
                   // Standard 3D format
                   <div className="grid grid-cols-3 gap-4 mb-4">

@@ -259,6 +259,7 @@ class VJEPA2ModelLoader:
         self._encoder: Optional[torch.nn.Module] = None
         self._predictor: Optional[torch.nn.Module] = None
         self._loaded_model_id: Optional[str] = None
+        self._model_load_lock = threading.Lock()  # Prevent concurrent model loading
 
         logger.info(f"VJEPA2ModelLoader initialized on {self.device_info.device_name}")
         logger.info(f"Recommended model: {self.device_info.recommended_model}")
@@ -271,7 +272,7 @@ class VJEPA2ModelLoader:
 
     def load_model(self, model_id: str = "vit-large", force_reload: bool = False) -> torch.nn.Module:
         """
-        Load a V-JEPA2 model.
+        Load a V-JEPA2 model with thread-safe locking to prevent race conditions.
 
         Args:
             model_id: One of 'vit-large', 'vit-huge', 'vit-giant'
@@ -283,79 +284,81 @@ class VJEPA2ModelLoader:
         if model_id not in self.MODEL_HUB_NAMES:
             raise ValueError(f"Unknown model: {model_id}. Available: {list(self.MODEL_HUB_NAMES.keys())}")
 
-        # Check if already loaded
-        if self._encoder is not None and self._loaded_model_id == model_id and not force_reload:
-            logger.info(f"Model {model_id} already loaded")
-            return self._encoder
+        # Thread-safe model loading (prevents concurrent loads from multiple planning requests)
+        with self._model_load_lock:
+            # Double-check after acquiring lock (another thread may have loaded it)
+            if self._encoder is not None and self._loaded_model_id == model_id and not force_reload:
+                logger.info(f"Model {model_id} already loaded")
+                return self._encoder
 
-        # Unload previous model to free memory
-        if self._encoder is not None:
-            self.unload_model()
+            # Unload previous model to free memory
+            if self._encoder is not None:
+                self.unload_model()
 
-        hub_name = self.MODEL_HUB_NAMES[model_id]
-        logger.info(f"Loading {model_id} ({hub_name}) on {self.device}...")
+            hub_name = self.MODEL_HUB_NAMES[model_id]
+            logger.info(f"Loading {model_id} ({hub_name}) on {self.device}...")
 
-        start_time = time.time()
+            start_time = time.time()
 
-        try:
-            # Load from PyTorch Hub - returns (encoder, predictor) tuple
-            result = torch.hub.load(
-                'facebookresearch/vjepa2',
-                hub_name,
-                pretrained=True,
-                trust_repo=True,
-            )
+            try:
+                # Load from PyTorch Hub - returns (encoder, predictor) tuple
+                result = torch.hub.load(
+                    'facebookresearch/vjepa2',
+                    hub_name,
+                    pretrained=True,
+                    trust_repo=True,
+                )
 
-            # V-JEPA2 returns a tuple: (encoder, predictor)
-            encoder, predictor = result
+                # V-JEPA2 returns a tuple: (encoder, predictor)
+                encoder, predictor = result
 
-            # Move to device and set dtype
-            dtype = self._get_torch_dtype()
-            encoder = encoder.to(device=self.device)
-            # Use .half() to ensure ALL layers/buffers are FP16, not just parameters
-            if dtype == torch.float16:
-                encoder = encoder.half()
-                # Recursively convert ALL submodules to ensure no mixed precision
-                for module in encoder.modules():
-                    if hasattr(module, 'half'):
-                        module.half()
-            encoder.eval()
-
-            # Disable gradients for inference
-            for param in encoder.parameters():
-                param.requires_grad = False
-
-            elapsed = time.time() - start_time
-            total_params = sum(p.numel() for p in encoder.parameters())
-            logger.info(f"Encoder loaded in {elapsed:.1f}s ({total_params/1e6:.1f}M params)")
-
-            self._encoder = encoder
-            self._loaded_model_id = model_id
-
-            # For AC models, also load predictor to GPU for action-conditioned prediction
-            if model_id in self.AC_MODELS:
-                predictor = predictor.to(device=self.device)
+                # Move to device and set dtype
+                dtype = self._get_torch_dtype()
+                encoder = encoder.to(device=self.device)
                 # Use .half() to ensure ALL layers/buffers are FP16, not just parameters
                 if dtype == torch.float16:
-                    predictor = predictor.half()
+                    encoder = encoder.half()
                     # Recursively convert ALL submodules to ensure no mixed precision
-                    for module in predictor.modules():
+                    for module in encoder.modules():
                         if hasattr(module, 'half'):
                             module.half()
-                predictor.eval()
-                for param in predictor.parameters():
+                encoder.eval()
+
+                # Disable gradients for inference
+                for param in encoder.parameters():
                     param.requires_grad = False
-                self._predictor = predictor
-                pred_params = sum(p.numel() for p in predictor.parameters())
-                logger.info(f"AC Predictor loaded ({pred_params/1e6:.1f}M params)")
-            else:
-                self._predictor = predictor  # Keep reference but don't load to GPU
 
-            return encoder
+                elapsed = time.time() - start_time
+                total_params = sum(p.numel() for p in encoder.parameters())
+                logger.info(f"Encoder loaded in {elapsed:.1f}s ({total_params/1e6:.1f}M params)")
 
-        except Exception as e:
-            logger.error(f"Failed to load model {model_id}: {e}")
-            raise
+                self._encoder = encoder
+                self._loaded_model_id = model_id
+
+                # For AC models, also load predictor to GPU for action-conditioned prediction
+                if model_id in self.AC_MODELS:
+                    predictor = predictor.to(device=self.device)
+                    # Use .half() to ensure ALL layers/buffers are FP16, not just parameters
+                    if dtype == torch.float16:
+                        predictor = predictor.half()
+                        # Recursively convert ALL submodules to ensure no mixed precision
+                        for module in predictor.modules():
+                            if hasattr(module, 'half'):
+                                module.half()
+                    predictor.eval()
+                    for param in predictor.parameters():
+                        param.requires_grad = False
+                    self._predictor = predictor
+                    pred_params = sum(p.numel() for p in predictor.parameters())
+                    logger.info(f"AC Predictor loaded ({pred_params/1e6:.1f}M params)")
+                else:
+                    self._predictor = predictor  # Keep reference but don't load to GPU
+
+                return encoder
+
+            except Exception as e:
+                logger.error(f"Failed to load model {model_id}: {e}")
+                raise
 
     def unload_model(self) -> None:
         """Unload the current model to free memory."""
@@ -745,9 +748,10 @@ class VJEPA2Inference:
         actions_expanded = actions_t.unsqueeze(1)  # (B, 1, 7)
 
         # Reuse cached zero states tensor (5-10% faster, avoids reallocation)
-        if self._cached_states is None or self._cached_states.shape[0] != num_samples:
+        # Only recreate if current cache is smaller than needed (allows reuse across varying batch sizes)
+        if self._cached_states is None or self._cached_states.shape[0] < num_samples:
             self._cached_states = torch.zeros(num_samples, 1, self.ACTION_DIM_AC, device=self.device, dtype=self.dtype)
-        states = self._cached_states[:num_samples]  # Slice if needed
+        states = self._cached_states[:num_samples]  # Slice to exact size needed
 
         # Run predictor to get predicted future embeddings with MPS AMP for 10-15% speedup
         # predictor(x, actions, states) -> predicted embeddings

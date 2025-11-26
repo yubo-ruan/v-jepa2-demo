@@ -4,19 +4,19 @@ import type { Experiment } from "@/types";
 
 // Preset configurations for planning
 export const planningPresets = [
-  { id: "quick" as const, label: "Quick", samples: 100, iterations: 5, tooltip: "100 samples, 5 iter (~1-2 min)" },
+  { id: "quick" as const, label: "Quick", samples: 100, iterations: 5, tooltip: "100 samples, 5 iter (~1-2 min)", recommended: false },
   { id: "balanced" as const, label: "Balanced", samples: 400, iterations: 10, tooltip: "400 samples, 10 iter (~3-4 min) - Recommended", recommended: true },
-  { id: "quality" as const, label: "Quality", samples: 800, iterations: 15, tooltip: "800 samples, 15 iter (~6-8 min)" },
+  { id: "quality" as const, label: "Quality", samples: 800, iterations: 15, tooltip: "800 samples, 15 iter (~6-8 min)", recommended: false },
 ] as const;
 
 export type PresetId = typeof planningPresets[number]["id"];
 
 // Navigation tabs
 export const navTabs = [
-  { id: "upload" as const, label: "Upload" },
+  { id: "inference" as const, label: "Inference" },
   { id: "config" as const, label: "Config" },
   { id: "history" as const, label: "History" },
-  { id: "research" as const, label: "Research" },
+  { id: "finetune" as const, label: "Fine-tune" },
 ] as const;
 
 export type NavTabId = typeof navTabs[number]["id"];
@@ -32,36 +32,44 @@ export type ConfigTabId = typeof configTabs[number]["id"];
 
 // Model dropdown options (base models)
 export const modelOptions = [
-  { value: "vit-large", label: "ViT-Large (fastest, 300M params)" },
-  { value: "vit-huge", label: "ViT-Huge (balanced, 600M params)" },
-  { value: "vit-giant", label: "ViT-Giant (best quality, 1.2B params) ⭐" },
-  { value: "vit-giant-384", label: "ViT-Giant 384 (highest resolution, 1.2B params)" },
+  { value: "vit-large", label: "ViT-Large (fastest, 300M params)", isAc: false },
+  { value: "vit-huge", label: "ViT-Huge (balanced, 630M params)", isAc: false },
+  { value: "vit-giant", label: "ViT-Giant (best quality, 1.2B params)", isAc: false },
+  { value: "vit-giant-ac", label: "ViT-Giant AC (7D actions, 1.2B params) ⭐", isAc: true },
 ] as const;
 
-// Model variants (fine-tuned versions)
+// Model variants - these map to actual V-JEPA2 hub models
 export const modelVariants = [
   {
-    id: "meta-baseline",
-    name: "Meta Baseline",
-    description: "Original V-JEPA 2-AC model from Meta",
-    baseModel: "vit-giant",
-    baseModelName: "V-JEPA 2-AC ViT-Giant",
-    isRecommended: false,
-  },
-  {
-    id: "droid-finetune-v1",
-    name: "DROID-finetune-v1",
-    description: "Fine-tuned on DROID dataset",
-    baseModel: "vit-giant",
-    baseModelName: "V-JEPA 2-AC ViT-Giant",
+    id: "vit-large",
+    name: "V-JEPA2 ViT-Large",
+    description: "Best for 16GB devices (~300M params, ~2.1GB)",
+    baseModel: "vit-large",
+    baseModelName: "vjepa2_vit_large",
     isRecommended: true,
   },
   {
-    id: "droid-finetune-v2",
-    name: "DROID-finetune-v2",
-    description: "Latest DROID fine-tune with improved robustness",
+    id: "vit-huge",
+    name: "V-JEPA2 ViT-Huge",
+    description: "Balanced quality/speed (~630M params, ~4.5GB)",
+    baseModel: "vit-huge",
+    baseModelName: "vjepa2_vit_huge",
+    isRecommended: false,
+  },
+  {
+    id: "vit-giant",
+    name: "V-JEPA2 ViT-Giant",
+    description: "Best quality, requires 32GB+ (~1.2B params, ~7.2GB)",
     baseModel: "vit-giant",
-    baseModelName: "V-JEPA 2-AC ViT-Giant",
+    baseModelName: "vjepa2_vit_giant",
+    isRecommended: false,
+  },
+  {
+    id: "vit-giant-ac",
+    name: "V-JEPA2-AC ViT-Giant",
+    description: "Action-Conditioned for planning (7D actions, ~7.2GB)",
+    baseModel: "vit-giant-ac",
+    baseModelName: "vjepa2_ac_vit_giant",
     isRecommended: false,
   },
 ] as const;
@@ -76,9 +84,9 @@ export const presetOptions = [
 
 // Cached models configuration
 export const cachedModelsConfig = [
-  { name: "ViT-Giant", params: "1.2B", size: "7.2 GB", cached: true, progress: 100 },
-  { name: "ViT-Huge", params: "600M", size: "~4.5 GB", cached: false, progress: 0 },
-  { name: "ViT-Large", params: "300M", size: "~2.1 GB", cached: false, progress: 0 },
+  { name: "ViT-Large", params: "300M", size: "~2.1 GB", cached: true, progress: 100 },
+  { name: "ViT-Huge", params: "630M", size: "~4.5 GB", cached: false, progress: 0 },
+  { name: "ViT-Giant", params: "1.2B", size: "~7.2 GB", cached: false, progress: 0 },
 ] as const;
 
 // Sample history data for demo
@@ -139,8 +147,8 @@ export const sampleExperiments: Experiment[] = [
 
 // Default values for state initialization
 export const defaultModelConfig = {
-  defaultModel: "vit-giant",
-  defaultVariant: "droid-finetune-v1",
+  defaultModel: "vit-large",
+  defaultVariant: "vit-large",
   defaultPreset: "balanced",
   customSamples: 600,
   customIterations: 12,

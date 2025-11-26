@@ -21,20 +21,28 @@ class PlanningRequest(BaseModel):
 
 class PlanningProgress(BaseModel):
     """Progress update during planning."""
-    iteration: int
-    total_iterations: int
-    best_energy: float
-    samples_evaluated: int
-    elapsed_seconds: float
-    eta_seconds: float
+    status: Literal["loading_model", "running", "completed"] = "running"
+    model_loading: Optional[str] = None  # Model name when status is "loading_model"
+    download_progress: Optional[float] = None  # 0.0-1.0 for model download progress
+    download_total_gb: Optional[float] = None  # Total download size in GB
+    download_downloaded_gb: Optional[float] = None  # Downloaded so far in GB
+    download_speed_mbps: Optional[float] = None  # Current download speed in MB/s
+    download_eta_seconds: Optional[float] = None  # Estimated time remaining for download
+    iteration: int = 0
+    total_iterations: int = 0
+    best_energy: float = 0.0
+    samples_evaluated: int = 0
+    elapsed_seconds: float = 0.0
+    eta_seconds: float = 0.0
 
 
 class ActionResult(BaseModel):
     """Result of planning - the optimal action."""
-    action: List[float]  # [x, y, z] or 7D
+    action: List[float]  # [x, y, z] or 7D for AC models
     confidence: float = Field(ge=0, le=1)
     energy: float
     energy_history: List[float] = []
+    is_ac_model: bool = False  # True if action-conditioned predictor was used
 
 
 class PlanningTaskResponse(BaseModel):
@@ -57,6 +65,9 @@ class PlanningResultResponse(BaseModel):
 # Model Management Schemas
 # =============================================================================
 
+ModelStatus = Literal["loaded", "loading", "cached", "downloading", "not_downloaded"]
+
+
 class ModelInfo(BaseModel):
     """Information about a model."""
     id: str
@@ -65,6 +76,25 @@ class ModelInfo(BaseModel):
     size_gb: float
     cached: bool
     download_progress: int = Field(ge=0, le=100)
+    is_ac: bool = False  # True if action-conditioned model
+    action_dim: Optional[int] = None  # 7 for AC models (DROID format)
+
+
+class ModelStatusItem(BaseModel):
+    """Model with full status information for management UI."""
+    id: str
+    name: str
+    params: str
+    size_gb: float
+    status: ModelStatus
+    download_percent: int = Field(ge=0, le=100, default=0)
+    is_ac: bool = False
+
+
+class ModelsStatusResponse(BaseModel):
+    """Response for model management status endpoint."""
+    models: List[ModelStatusItem]
+    loaded_model: Optional[str] = None
 
 
 class ModelsResponse(BaseModel):
@@ -151,5 +181,5 @@ class HealthResponse(BaseModel):
 
 class WSMessage(BaseModel):
     """WebSocket message wrapper."""
-    type: Literal["progress", "completed", "error", "cancelled"]
+    type: Literal["progress", "loading_model", "completed", "error", "cancelled"]
     data: dict

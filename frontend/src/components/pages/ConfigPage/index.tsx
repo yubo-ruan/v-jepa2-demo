@@ -1,60 +1,61 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { SaveIcon, ResetIcon } from "@/components/icons";
-import { styles } from "@/components/ui";
-import { useConfig, useToast } from "@/contexts";
-import { configTabs, modelVariants as defaultVariants, presetOptions, cachedModelsConfig } from "@/constants";
-import { api, type ModelVariant } from "@/lib/api";
+import { styles, Spinner, focusRing } from "@/components/ui";
+import { useConfig, useToast, useModels } from "@/contexts";
+import { configTabs, presetOptions } from "@/constants";
+import { ModelManagementTable } from "@/components/ModelManagementTable";
 
 export function ConfigPage() {
   const [configTab, setConfigTab] = useState<"model" | "ui" | "advanced">("model");
-  const [modelVariants, setModelVariants] = useState<ModelVariant[]>([]);
-  const [isLoadingVariants, setIsLoadingVariants] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+  const {
+    models,
+    loadedModel,
+    isLoading: isLoadingModels,
+    isActioning,
+    loadModel,
+    unloadModel,
+    downloadModel,
+    cancelDownload,
+  } = useModels();
   const {
     modelConfig,
     uiConfig,
     advancedConfig,
-    downloadConfig,
     updateModelConfig,
     updateUIConfig,
     updateAdvancedConfig,
-    updateDownloadConfig,
     saveConfig,
     resetConfig
   } = useConfig();
   const { showToast } = useToast();
 
-  // Fetch model variants from backend API
-  useEffect(() => {
-    api.getModelVariants()
-      .then((variants) => {
-        setModelVariants(variants);
-        setIsLoadingVariants(false);
-      })
-      .catch((err) => {
-        console.error("Failed to fetch model variants:", err);
-        // Fall back to default variants
-        setModelVariants(defaultVariants.map(v => ({
-          id: v.id,
-          name: v.name,
-          description: v.description,
-          baseModel: v.baseModel,
-          baseModelName: v.baseModelName,
-          isRecommended: v.isRecommended,
-        })));
-        setIsLoadingVariants(false);
-      });
-  }, []);
-
-  const handleSave = () => {
-    saveConfig();
-    showToast("Settings saved successfully", "success");
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await saveConfig();
+      showToast("Settings saved successfully", "success");
+    } catch {
+      showToast("Failed to save settings", "error");
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  // Get selected variant info
-  const selectedVariant = modelVariants.find(v => v.id === (modelConfig.defaultVariant || "droid-finetune-v1"))
-    || modelVariants[0];
+  const handleReset = async () => {
+    setIsResetting(true);
+    try {
+      await resetConfig();
+      showToast("Settings reset to defaults", "success");
+    } catch {
+      showToast("Failed to reset settings", "error");
+    } finally {
+      setIsResetting(false);
+    }
+  };
 
   return (
     <>
@@ -64,17 +65,19 @@ export function ConfigPage() {
         <div className="flex gap-2">
           <button
             onClick={handleSave}
-            className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-lg transition-all text-sm font-medium shadow-lg shadow-indigo-500/25 hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2"
+            disabled={isSaving}
+            className={`px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-lg transition-all text-sm font-medium shadow-lg shadow-indigo-500/25 hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 ${focusRing}`}
           >
-            <SaveIcon />
-            Save
+            {isSaving ? <Spinner size="sm" /> : <SaveIcon />}
+            {isSaving ? "Saving..." : "Save"}
           </button>
           <button
-            onClick={resetConfig}
-            className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-colors text-sm flex items-center gap-2"
+            onClick={handleReset}
+            disabled={isResetting}
+            className={`px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-colors text-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`}
           >
-            <ResetIcon />
-            Reset
+            {isResetting ? <Spinner size="sm" /> : <ResetIcon />}
+            {isResetting ? "Resetting..." : "Reset"}
           </button>
         </div>
       </div>
@@ -99,63 +102,19 @@ export function ConfigPage() {
       {/* Model Preferences Tab */}
       {configTab === "model" && (
         <div className="space-y-6">
-          {/* Model Selection */}
+          {/* Model Management - Primary section at top */}
           <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
-            <h3 className="text-base font-semibold text-zinc-300 mb-5">
-              Model Selection
-              {isLoadingVariants && <span className="ml-2 text-xs text-zinc-500">(loading from API...)</span>}
-            </h3>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-zinc-400 mb-2">Model</label>
-                <select
-                  value={modelConfig.defaultVariant || "droid-finetune-v1"}
-                  onChange={(e) => {
-                    const variant = modelVariants.find(v => v.id === e.target.value);
-                    updateModelConfig({
-                      defaultVariant: e.target.value,
-                      defaultModel: variant?.baseModel || "vit-giant"
-                    });
-                  }}
-                  className={styles.input}
-                  disabled={isLoadingVariants}
-                >
-                  {modelVariants.length > 0 ? (
-                    modelVariants.map((variant) => (
-                      <option key={variant.id} value={variant.id}>
-                        {variant.name} {variant.isRecommended && "⭐"}
-                      </option>
-                    ))
-                  ) : (
-                    <option value="droid-finetune-v1">Loading...</option>
-                  )}
-                </select>
-              </div>
-
-              {/* Show base model info */}
-              <div className="bg-zinc-900 rounded-lg p-3">
-                <span className="text-sm text-zinc-400">Using: </span>
-                <span className="text-sm text-zinc-200 font-medium">
-                  {selectedVariant?.baseModelName || "V-JEPA 2-AC ViT-Giant"}
-                </span>
-              </div>
-
-              {/* Variant description */}
-              <p className="text-xs text-zinc-500">
-                {selectedVariant?.description || "Loading model information..."}
-              </p>
-
-              {/* API status indicator */}
-              <div className="flex items-center gap-2 text-xs">
-                <span className={`w-2 h-2 rounded-full ${modelVariants.length > 0 ? "bg-green-500" : "bg-yellow-500"}`} />
-                <span className="text-zinc-500">
-                  {modelVariants.length > 0
-                    ? `${modelVariants.length} variants loaded from API`
-                    : "Connecting to backend..."}
-                </span>
-              </div>
-            </div>
+            <h3 className="text-base font-semibold text-zinc-300 mb-5">Model Management</h3>
+            <ModelManagementTable
+              models={models}
+              loadedModel={loadedModel}
+              isActioning={isActioning}
+              isLoading={isLoadingModels}
+              onLoad={loadModel}
+              onUnload={unloadModel}
+              onDownload={downloadModel}
+              onCancelDownload={cancelDownload}
+            />
           </div>
 
           {/* Default Preset Settings */}
@@ -237,110 +196,13 @@ export function ConfigPage() {
               </div>
 
               <div className="flex gap-2 pt-2">
-                <button className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors text-sm">
+                <button className={`px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors text-sm ${focusRing}`}>
                   Save Preset
                 </button>
-                <button className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors text-sm">
+                <button className={`px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors text-sm ${focusRing}`}>
                   Delete Preset
                 </button>
               </div>
-            </div>
-          </div>
-
-          {/* Model Download Settings */}
-          <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
-            <h3 className="text-base font-semibold text-zinc-300 mb-5">Model Download Settings</h3>
-
-            <div className="space-y-3 mb-6">
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={downloadConfig.autoDownload}
-                  onChange={(e) => updateDownloadConfig({ autoDownload: e.target.checked })}
-                  className={styles.checkbox}
-                />
-                <span className="text-sm text-zinc-300">Auto-download models on startup</span>
-              </label>
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={downloadConfig.cacheModels}
-                  onChange={(e) => updateDownloadConfig({ cacheModels: e.target.checked })}
-                  className={styles.checkbox}
-                />
-                <span className="text-sm text-zinc-300">Cache models locally (saves ~7GB disk space)</span>
-              </label>
-              <label className="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={downloadConfig.cpuOnly}
-                  onChange={(e) => updateDownloadConfig({ cpuOnly: e.target.checked })}
-                  className={styles.checkbox}
-                />
-                <span className="text-sm text-zinc-300">Use CPU-only mode (for testing without GPU)</span>
-              </label>
-            </div>
-
-            <div className="mb-4">
-              <p className="text-sm text-zinc-400 mb-3">Current cached models:</p>
-              <div className="space-y-3">
-                {cachedModelsConfig.map((model) => (
-                  <div key={model.name} className="bg-zinc-900 rounded-lg p-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className={model.cached ? "text-green-400" : "text-zinc-500"}>
-                          {model.cached ? "✓" : "○"}
-                        </span>
-                        <span className={`font-medium ${model.cached ? "text-zinc-200" : "text-zinc-400"}`}>
-                          {model.name}
-                        </span>
-                        <span className={`text-xs px-1.5 py-0.5 rounded ${
-                          model.cached
-                            ? "bg-green-600/20 text-green-400"
-                            : "bg-zinc-700 text-zinc-400"
-                        }`}>
-                          {model.params} params
-                        </span>
-                      </div>
-                      <span className={`text-sm ${model.cached ? "text-zinc-400" : "text-zinc-500"}`}>
-                        {model.size}
-                      </span>
-                    </div>
-                    <div className="w-full h-1.5 bg-zinc-700 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full ${model.cached ? "bg-green-500" : "bg-zinc-600"}`}
-                        style={{ width: `${model.progress}%` }}
-                      />
-                    </div>
-                    <div className="flex justify-between items-center mt-2">
-                      <span className={`text-xs ${model.cached ? "text-green-400" : "text-zinc-500"}`}>
-                        {model.cached ? "Downloaded" : "Not cached"}
-                      </span>
-                      {model.cached ? (
-                        <button className="text-xs text-red-400 hover:text-red-300 transition-colors">
-                          Remove
-                        </button>
-                      ) : (
-                        <button className="text-xs px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded transition-colors">
-                          Download
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex gap-2">
-              <button className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors text-sm flex items-center gap-2">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                </svg>
-                Download All
-              </button>
-              <button className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors text-sm">
-                Clear Cache
-              </button>
             </div>
           </div>
 
@@ -395,7 +257,7 @@ export function ConfigPage() {
               </div>
             </div>
 
-            <button className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors text-sm">
+            <button className={`px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors text-sm ${focusRing}`}>
               Reset to Defaults
             </button>
           </div>
@@ -577,10 +439,10 @@ export function ConfigPage() {
             </div>
 
             <div className="flex gap-2">
-              <button className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors text-sm">
+              <button className={`px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors text-sm ${focusRing}`}>
                 Download Logs
               </button>
-              <button className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors text-sm">
+              <button className={`px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 rounded-lg transition-colors text-sm ${focusRing}`}>
                 Clear Logs
               </button>
             </div>

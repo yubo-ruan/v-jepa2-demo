@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState, useEffect, useCallback, useRef } from "react";
 import {
   CameraIcon,
   TargetIcon,
@@ -9,19 +9,23 @@ import {
   XCircleIcon,
   ClockIcon,
   RocketIcon,
-  PauseIcon,
   StopIcon,
   EyeIcon,
   ExportIcon,
-  CompareIcon,
   ResultsIcon,
+  RetryIcon,
+  AlertIcon,
 } from "@/components/icons";
 import { EnergyLandscape, IterationReplay } from "@/components/visualizations";
-import { styles } from "@/components/ui";
-import { usePlanning } from "@/contexts";
-import { planningPresets } from "@/constants";
+import { styles, Spinner, Modal, focusRing } from "@/components/ui";
+import { usePlanning, useToast, useModels } from "@/contexts";
+import { planningPresets, config } from "@/constants";
 
-export function UploadPage() {
+interface UploadPageProps {
+  onGoToConfig: () => void;
+}
+
+export function UploadPage({ onGoToConfig }: UploadPageProps) {
   const {
     planningState,
     setPreset,
@@ -32,6 +36,7 @@ export function UploadPage() {
     startPlanning,
     cancelPlanning,
     completePlanning,
+    clearError,
     reset,
     canGenerate,
     estimatedTime,
@@ -39,6 +44,141 @@ export function UploadPage() {
   } = usePlanning();
 
   const { preset, samples, iterations, currentImage, goalImage, hasResults, isProcessing, progress, result, error } = planningState;
+  const { showToast } = useToast();
+
+  // Model management from useModels hook
+  const { models, loadedModel, isLoading: isLoadingModels } = useModels();
+  const loadedModelInfo = models.find(m => m.id === loadedModel);
+
+  const [showDetailsModal, setShowDetailsModal] = useState(false);
+
+  // Export results as JSON
+  const handleExport = () => {
+    if (!result) return;
+
+    const exportData = {
+      timestamp: new Date().toISOString(),
+      model: loadedModel || "unknown",
+      parameters: {
+        preset,
+        samples,
+        iterations,
+      },
+      result: {
+        action: result.action,
+        confidence: result.confidence,
+        energy: result.energy,
+        energyHistory: result.energyHistory,
+      },
+    };
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `vjepa2-result-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    showToast("Results exported successfully", "success");
+  };
+
+  // Show error toast when planning fails
+  useEffect(() => {
+    if (error) {
+      showToast(error, "error");
+    }
+  }, [error, showToast]);
+
+  // Note: We don't revoke blob URLs to avoid broken image issues
+  // This causes a small memory leak, but blob URLs are tiny (just pointers)
+  // and will be cleaned up when the page is closed
+
+  // Wrapper to pass loaded model to planning
+  const handleStartPlanning = useCallback(() => {
+    if (loadedModel) {
+      startPlanning(loadedModel);
+    }
+  }, [loadedModel, startPlanning]);
+
+  // Keyboard shortcut: Cmd/Ctrl + Enter to generate plan
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && canGenerate && loadedModel) {
+        e.preventDefault();
+        handleStartPlanning();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [canGenerate, loadedModel, handleStartPlanning]);
+
+  // Retry planning after error
+  const handleRetry = () => {
+    clearError();
+    handleStartPlanning();
+  };
+
+  // Image validation constants
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+  const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
+
+  // Validate and handle image upload
+  const handleImageUpload = (file: File, type: "current" | "goal") => {
+    // Validate file type
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      showToast("Invalid file type. Please upload JPG, PNG, or WebP.", "error");
+      return;
+    }
+
+    // Validate file size
+    if (file.size > MAX_FILE_SIZE) {
+      showToast("File too large. Maximum size is 10MB.", "error");
+      return;
+    }
+
+    // Create preview URL
+    const previewUrl = URL.createObjectURL(file);
+
+    if (type === "current") {
+      setCurrentImage(previewUrl);
+    } else {
+      setGoalImage(previewUrl);
+    }
+
+    showToast(`${type === "current" ? "Current" : "Goal"} image uploaded`, "success");
+  };
+
+  // Handle file input change
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, type: "current" | "goal") => {
+    const file = e.target.files?.[0];
+    if (file) {
+      handleImageUpload(file, type);
+    }
+  };
+
+  // Handle drag and drop
+  const handleDrop = (e: React.DragEvent, type: "current" | "goal") => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      handleImageUpload(file, type);
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  // Handle keyboard activation for dropzones (Enter/Space)
+  const handleKeyDown = (e: React.KeyboardEvent, inputId: string) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      document.getElementById(inputId)?.click();
+    }
+  };
 
   // Use real energy history from result, or build from progress updates
   const convergenceData = useMemo(() => {
@@ -71,28 +211,106 @@ export function UploadPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
         <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
           <h3 className="text-base font-semibold text-zinc-300 mb-4">Where you are now</h3>
-          <div className="min-h-[200px] bg-zinc-900 rounded-lg border-2 border-dashed border-zinc-600 hover:border-indigo-500 hover:bg-indigo-500/5 transition-all cursor-pointer flex flex-col items-center justify-center gap-4 group p-8">
-            <div className="w-14 h-14 rounded-full bg-zinc-800 group-hover:bg-indigo-500/20 transition-colors flex items-center justify-center">
-              <CameraIcon className="group-hover:text-indigo-400" />
-            </div>
-            <div className="text-center">
-              <p className="text-zinc-300 text-sm font-medium group-hover:text-indigo-300 transition-colors">Current State Image</p>
-              <p className="text-zinc-500 text-xs mt-2">Click to browse or drag image here</p>
-              <p className="text-zinc-600 text-xs mt-1">JPG, PNG, WebP (max 10MB)</p>
-            </div>
+          <input
+            type="file"
+            id="current-image-input"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => handleFileChange(e, "current")}
+            className="hidden"
+            aria-label="Upload current state image"
+          />
+          <div
+            role="button"
+            tabIndex={0}
+            aria-label={currentImage ? "Current state image uploaded. Click or press Enter to change" : "Upload current state image. Click or press Enter to browse, or drag and drop"}
+            onClick={() => document.getElementById("current-image-input")?.click()}
+            onKeyDown={(e) => handleKeyDown(e, "current-image-input")}
+            onDrop={(e) => handleDrop(e, "current")}
+            onDragOver={handleDragOver}
+            className={`min-h-[200px] bg-zinc-900 rounded-lg border-2 border-dashed border-zinc-600 hover:border-indigo-500 hover:bg-indigo-500/5 transition-all cursor-pointer flex flex-col items-center justify-center gap-4 group p-8 relative overflow-hidden ${focusRing}`}
+          >
+            {currentImage && currentImage !== "demo" ? (
+              <>
+                <img
+                  src={currentImage}
+                  alt="Current state"
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+                <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center">
+                  <p className="text-white text-sm font-medium">Click to change</p>
+                </div>
+              </>
+            ) : currentImage === "demo" ? (
+              <div className="flex flex-col items-center justify-center">
+                <div className="w-14 h-14 rounded-full bg-indigo-500/20 flex items-center justify-center mb-2">
+                  <CameraIcon className="text-indigo-400" />
+                </div>
+                <p className="text-indigo-400 text-sm font-medium">Demo Image Loaded</p>
+              </div>
+            ) : (
+              <>
+                <div className="w-14 h-14 rounded-full bg-zinc-800 group-hover:bg-indigo-500/20 transition-colors flex items-center justify-center">
+                  <CameraIcon className="group-hover:text-indigo-400" />
+                </div>
+                <div className="text-center">
+                  <p className="text-zinc-300 text-sm font-medium group-hover:text-indigo-300 transition-colors">Current State Image</p>
+                  <p className="text-zinc-500 text-xs mt-2">Click to browse or drag image here</p>
+                  <p className="text-zinc-600 text-xs mt-1">JPG, PNG, WebP (max 10MB)</p>
+                </div>
+              </>
+            )}
           </div>
         </div>
         <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
           <h3 className="text-base font-semibold text-zinc-300 mb-4">Where you want to be</h3>
-          <div className="min-h-[200px] bg-zinc-900 rounded-lg border-2 border-dashed border-zinc-600 hover:border-emerald-500 hover:bg-emerald-500/5 transition-all cursor-pointer flex flex-col items-center justify-center gap-4 group p-8">
-            <div className="w-14 h-14 rounded-full bg-zinc-800 group-hover:bg-emerald-500/20 transition-colors flex items-center justify-center">
-              <TargetIcon className="group-hover:text-emerald-400" />
-            </div>
-            <div className="text-center">
-              <p className="text-zinc-300 text-sm font-medium group-hover:text-emerald-300 transition-colors">Goal State Image</p>
-              <p className="text-zinc-500 text-xs mt-2">Click to browse or drag image here</p>
-              <p className="text-zinc-600 text-xs mt-1">JPG, PNG, WebP (max 10MB)</p>
-            </div>
+          <input
+            type="file"
+            id="goal-image-input"
+            accept="image/jpeg,image/png,image/webp"
+            onChange={(e) => handleFileChange(e, "goal")}
+            className="hidden"
+            aria-label="Upload goal state image"
+          />
+          <div
+            role="button"
+            tabIndex={0}
+            aria-label={goalImage ? "Goal state image uploaded. Click or press Enter to change" : "Upload goal state image. Click or press Enter to browse, or drag and drop"}
+            onClick={() => document.getElementById("goal-image-input")?.click()}
+            onKeyDown={(e) => handleKeyDown(e, "goal-image-input")}
+            onDrop={(e) => handleDrop(e, "goal")}
+            onDragOver={handleDragOver}
+            className={`min-h-[200px] bg-zinc-900 rounded-lg border-2 border-dashed border-zinc-600 hover:border-emerald-500 hover:bg-emerald-500/5 transition-all cursor-pointer flex flex-col items-center justify-center gap-4 group p-8 relative overflow-hidden ${focusRing}`}
+          >
+            {goalImage && goalImage !== "demo" ? (
+              <>
+                <img
+                  src={goalImage}
+                  alt="Goal state"
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+                <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center">
+                  <p className="text-white text-sm font-medium">Click to change</p>
+                </div>
+              </>
+            ) : goalImage === "demo" ? (
+              <div className="flex flex-col items-center justify-center">
+                <div className="w-14 h-14 rounded-full bg-emerald-500/20 flex items-center justify-center mb-2">
+                  <TargetIcon className="text-emerald-400" />
+                </div>
+                <p className="text-emerald-400 text-sm font-medium">Demo Image Loaded</p>
+              </div>
+            ) : (
+              <>
+                <div className="w-14 h-14 rounded-full bg-zinc-800 group-hover:bg-emerald-500/20 transition-colors flex items-center justify-center">
+                  <TargetIcon className="group-hover:text-emerald-400" />
+                </div>
+                <div className="text-center">
+                  <p className="text-zinc-300 text-sm font-medium group-hover:text-emerald-300 transition-colors">Goal State Image</p>
+                  <p className="text-zinc-500 text-xs mt-2">Click to browse or drag image here</p>
+                  <p className="text-zinc-600 text-xs mt-1">JPG, PNG, WebP (max 10MB)</p>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -204,40 +422,69 @@ export function UploadPage() {
           </div>
         </div>
 
-        {/* Model and Actions */}
-        <div className="flex flex-wrap gap-3">
-          <select className="px-4 py-2.5 bg-zinc-700 text-white rounded-lg border-none outline-none text-sm">
-            <option>Model: ViT-Large</option>
-            <option>Model: ViT-Huge</option>
-            <option>Model: ViT-Giant</option>
-          </select>
-          <button
-            disabled={!canGenerate}
-            onClick={startPlanning}
-            className={`px-5 py-2.5 rounded-lg transition-all text-sm font-medium flex items-center gap-2 ${
-              canGenerate
-                ? "bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:scale-[1.02] active:scale-[0.98]"
-                : "bg-zinc-700 text-zinc-500 cursor-not-allowed"
-            }`}
-          >
-            {canGenerate && <RocketIcon />}
-            Generate Plan
-          </button>
+        {/* Model Display and Actions */}
+        <div className="flex flex-wrap gap-3 items-center">
+          {/* Read-only model display */}
+          <div className="px-4 py-2.5 bg-zinc-700 rounded-lg border border-zinc-600 min-w-[200px]">
+            {isLoadingModels ? (
+              <div className="flex items-center gap-2">
+                <Spinner size="sm" />
+                <span className="text-zinc-400 text-sm">Loading...</span>
+              </div>
+            ) : loadedModel ? (
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-200 text-sm">{loadedModelInfo?.name || loadedModel}</span>
+                <span className="text-xs text-green-400 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 bg-green-400 rounded-full" />
+                  Loaded
+                </span>
+              </div>
+            ) : (
+              <button
+                onClick={onGoToConfig}
+                className="flex items-center justify-between w-full text-amber-400 hover:text-amber-300 transition-colors"
+              >
+                <span className="text-sm">No model loaded</span>
+                <span className="text-xs">Go to Config &rarr;</span>
+              </button>
+            )}
+          </div>
+          <div className="group relative">
+            <button
+              disabled={!canGenerate || !loadedModel}
+              onClick={handleStartPlanning}
+              className={`px-5 py-2.5 rounded-lg transition-all text-sm font-medium flex items-center gap-2 ${
+                canGenerate && loadedModel
+                  ? "bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:scale-[1.02] active:scale-[0.98]"
+                  : "bg-zinc-700 text-zinc-500 cursor-not-allowed"
+              }`}
+            >
+              {canGenerate && loadedModel && <RocketIcon />}
+              Generate Plan
+            </button>
+            {canGenerate && loadedModel && (
+              <span className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                or press <kbd className="px-1.5 py-0.5 bg-zinc-700 rounded text-zinc-400">&#8984;+Enter</kbd>
+              </span>
+            )}
+          </div>
           <button
             onClick={reset}
             className="px-4 py-2.5 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-colors text-sm"
           >
             Reset
           </button>
-          <button
-            onClick={() => {
-              setCurrentImage("demo");
-              setGoalImage("demo");
-            }}
-            className="px-4 py-2.5 bg-zinc-600 hover:bg-zinc-500 text-zinc-300 rounded-lg transition-colors text-xs"
-          >
-            (Demo: Load images)
-          </button>
+          {config.enableDemoMode && (
+            <button
+              onClick={() => {
+                setCurrentImage("demo");
+                setGoalImage("demo");
+              }}
+              className="px-4 py-2.5 bg-zinc-600 hover:bg-zinc-500 text-zinc-300 rounded-lg transition-colors text-xs"
+            >
+              (Demo: Load images)
+            </button>
+          )}
         </div>
       </div>
 
@@ -245,7 +492,117 @@ export function UploadPage() {
       <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6 mb-8">
         <h3 className="text-base font-semibold text-zinc-300 mb-5">Progress Dashboard</h3>
 
-        {isProcessing ? (
+        {isProcessing && progress?.status === "loading_model" ? (
+          /* Loading Model State */
+          <div className="flex flex-col items-center justify-center py-8 text-center animate-in fade-in duration-300">
+            <div className="w-16 h-16 rounded-full bg-indigo-500/10 flex items-center justify-center mb-4">
+              <Spinner size="lg" />
+            </div>
+            <p className="text-indigo-400 font-medium mb-2">Loading Model</p>
+            <p className="text-zinc-400 text-sm mb-4">
+              {progress.modelLoading ? `Loading ${progress.modelLoading}...` : "Preparing model..."}
+            </p>
+
+            {/* Determine loading stage */}
+            {(() => {
+              const isDownloading = progress.downloadProgress !== undefined && progress.downloadProgress > 0 && progress.downloadProgress < 1;
+              const isLoadingToGpu = progress.downloadProgress === 1 || (progress.downloadDownloadedGb !== undefined && progress.downloadTotalGb !== undefined && progress.downloadDownloadedGb >= progress.downloadTotalGb);
+
+              if (isDownloading) {
+                // Downloading from internet
+                return (
+                  <>
+                    <p className="text-zinc-500 text-xs max-w-xs mb-4">
+                      Downloading model checkpoint from the internet...
+                    </p>
+                    <div className="w-full max-w-xs">
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-zinc-500">Downloading</span>
+                        <span className="text-zinc-400">{Math.round((progress.downloadProgress || 0) * 100)}%</span>
+                      </div>
+                      <div className="h-2 bg-zinc-700 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-gradient-to-r from-indigo-600 to-purple-500 rounded-full transition-all"
+                          style={{ width: `${(progress.downloadProgress || 0) * 100}%` }}
+                        />
+                      </div>
+                      {/* Size and speed info */}
+                      <div className="flex justify-between text-xs mt-2">
+                        {progress.downloadDownloadedGb !== undefined && progress.downloadTotalGb !== undefined ? (
+                          <span className="text-zinc-500">
+                            {progress.downloadDownloadedGb.toFixed(2)} / {progress.downloadTotalGb.toFixed(2)} GB
+                          </span>
+                        ) : progress.downloadTotalGb !== undefined ? (
+                          <span className="text-zinc-500">
+                            {progress.downloadTotalGb.toFixed(1)} GB total
+                          </span>
+                        ) : (
+                          <span className="text-zinc-500">—</span>
+                        )}
+                        {progress.downloadSpeedMbps !== undefined && progress.downloadSpeedMbps > 0 && (
+                          <span className="text-zinc-500">
+                            {progress.downloadSpeedMbps.toFixed(1)} MB/s
+                          </span>
+                        )}
+                      </div>
+                      {/* ETA info */}
+                      {progress.downloadEtaSeconds !== undefined && progress.downloadEtaSeconds > 0 && (
+                        <p className="text-center text-xs text-amber-400 mt-2">
+                          ~{formatTime(progress.downloadEtaSeconds)} remaining
+                        </p>
+                      )}
+                    </div>
+                  </>
+                );
+              } else if (isLoadingToGpu) {
+                // Loading cached model to GPU
+                return (
+                  <>
+                    <div className="w-full max-w-xs">
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className="text-zinc-500">Loading to GPU memory</span>
+                        <span className="text-emerald-400">Cached ✓</span>
+                      </div>
+                      <div className="h-2 bg-zinc-700 rounded-full overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-emerald-600 to-teal-500 rounded-full animate-pulse w-full" />
+                      </div>
+                      {progress.downloadTotalGb !== undefined && (
+                        <p className="text-center text-xs text-zinc-500 mt-2">
+                          {progress.downloadTotalGb.toFixed(1)} GB → GPU memory
+                        </p>
+                      )}
+                    </div>
+                    <p className="text-zinc-500 text-xs mt-3 max-w-xs">
+                      Model is cached locally. Loading into GPU memory...
+                    </p>
+                  </>
+                );
+              } else {
+                // Initial state / preparing
+                return (
+                  <>
+                    <p className="text-zinc-500 text-xs max-w-xs">
+                      This may take a few minutes if the model needs to be downloaded for the first time.
+                    </p>
+                    {progress.downloadTotalGb !== undefined && (
+                      <p className="text-zinc-500 text-xs mt-4">
+                        Model size: {progress.downloadTotalGb.toFixed(1)} GB
+                      </p>
+                    )}
+                  </>
+                );
+              }
+            })()}
+
+            <button
+              onClick={cancelPlanning}
+              className="mt-6 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-all text-sm flex items-center gap-2"
+            >
+              <StopIcon />
+              Cancel
+            </button>
+          </div>
+        ) : isProcessing ? (
           <>
             {/* Progress Bar */}
             <div className="mb-5">
@@ -299,12 +656,8 @@ export function UploadPage() {
               </div>
             </div>
 
-            {/* Control Buttons */}
+            {/* Control Button */}
             <div className="flex gap-3">
-              <button className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg transition-all text-sm font-medium hover:scale-[1.02] active:scale-[0.98]">
-                <PauseIcon />
-                Pause
-              </button>
               <button
                 onClick={cancelPlanning}
                 className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-all text-sm font-medium hover:scale-[1.02] active:scale-[0.98]"
@@ -314,13 +667,55 @@ export function UploadPage() {
               </button>
             </div>
           </>
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center py-8 text-center animate-in fade-in duration-300">
+            <div className="w-16 h-16 rounded-full bg-red-500/10 flex items-center justify-center mb-4">
+              <AlertIcon className="w-8 h-8 text-red-400" />
+            </div>
+            <p className="text-red-400 font-medium mb-2">Planning Failed</p>
+            <p className="text-zinc-500 text-sm max-w-xs mb-6">{error}</p>
+            <button
+              onClick={handleRetry}
+              className={`flex items-center justify-center gap-2 px-6 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-lg transition-all text-sm font-medium shadow-lg shadow-indigo-500/25 hover:scale-[1.02] active:scale-[0.98] ${focusRing}`}
+            >
+              <RetryIcon className="w-4 h-4" />
+              Try Again
+            </button>
+          </div>
         ) : (
-          <div className="flex flex-col items-center justify-center py-12 text-center">
-            <div className="w-16 h-16 rounded-full bg-zinc-900 flex items-center justify-center mb-4">
+          <div className="flex flex-col items-center justify-center py-8 text-center">
+            <div className="w-14 h-14 rounded-full bg-zinc-900 flex items-center justify-center mb-4">
               <ClockIcon />
             </div>
-            <p className="text-zinc-400 text-sm">No active process</p>
-            <p className="text-zinc-600 text-xs mt-1">Upload images and click Generate Plan to start</p>
+            <p className="text-zinc-300 text-sm font-medium mb-4">Ready to Plan</p>
+
+            {/* Step-by-step guidance */}
+            <div className="space-y-2 text-left max-w-xs">
+              <div className="flex items-center gap-3">
+                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-medium ${currentImage ? "bg-green-500/20 text-green-400" : "bg-zinc-700 text-zinc-400"}`}>
+                  {currentImage ? "✓" : "1"}
+                </div>
+                <span className={`text-sm ${currentImage ? "text-green-400" : "text-zinc-400"}`}>
+                  Upload current state image
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-medium ${goalImage ? "bg-green-500/20 text-green-400" : "bg-zinc-700 text-zinc-400"}`}>
+                  {goalImage ? "✓" : "2"}
+                </div>
+                <span className={`text-sm ${goalImage ? "text-green-400" : "text-zinc-400"}`}>
+                  Upload goal state image
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="w-6 h-6 rounded-full bg-zinc-700 flex items-center justify-center text-xs font-medium text-zinc-400">
+                  3
+                </div>
+                <span className="text-sm text-zinc-400">
+                  Click Generate Plan
+                </span>
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -377,21 +772,61 @@ export function UploadPage() {
 
             {/* Action Details */}
             <div className="flex-1 space-y-4">
-              {/* Coordinates */}
-              <div className="grid grid-cols-3 gap-3">
-                <div className="bg-zinc-900 rounded-lg p-4 transform transition-all hover:scale-[1.02]" style={{ animationDelay: "100ms" }}>
-                  <p className="text-xs text-red-400 mb-1 font-medium">X Axis</p>
-                  <p className="text-xl font-mono font-semibold text-zinc-200">{result?.action[0]?.toFixed(1) ?? "0.0"} <span className="text-xs text-zinc-500">cm</span></p>
+              {/* Coordinates - 3D or 7D based on model type */}
+              {result?.isAcModel ? (
+                // 7D DROID action format
+                <div className="space-y-3">
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
+                      <p className="text-xs text-red-400 mb-1 font-medium">X</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[0]?.toFixed(3) ?? "0"}</p>
+                    </div>
+                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
+                      <p className="text-xs text-green-400 mb-1 font-medium">Y</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[1]?.toFixed(3) ?? "0"}</p>
+                    </div>
+                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
+                      <p className="text-xs text-blue-400 mb-1 font-medium">Z</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[2]?.toFixed(3) ?? "0"}</p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-4 gap-3">
+                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
+                      <p className="text-xs text-amber-400 mb-1 font-medium">Roll</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[3]?.toFixed(3) ?? "0"}</p>
+                    </div>
+                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
+                      <p className="text-xs text-purple-400 mb-1 font-medium">Pitch</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[4]?.toFixed(3) ?? "0"}</p>
+                    </div>
+                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
+                      <p className="text-xs text-cyan-400 mb-1 font-medium">Yaw</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[5]?.toFixed(3) ?? "0"}</p>
+                    </div>
+                    <div className="bg-zinc-900 rounded-lg p-3 transform transition-all hover:scale-[1.02]">
+                      <p className="text-xs text-pink-400 mb-1 font-medium">Gripper</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result?.action[6]?.toFixed(3) ?? "0"}</p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-zinc-500 text-center">7D DROID Action Format</p>
                 </div>
-                <div className="bg-zinc-900 rounded-lg p-4 transform transition-all hover:scale-[1.02]" style={{ animationDelay: "200ms" }}>
-                  <p className="text-xs text-green-400 mb-1 font-medium">Y Axis</p>
-                  <p className="text-xl font-mono font-semibold text-zinc-200">{result?.action[1]?.toFixed(1) ?? "0.0"} <span className="text-xs text-zinc-500">cm</span></p>
+              ) : (
+                // Standard 3D action
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-zinc-900 rounded-lg p-4 transform transition-all hover:scale-[1.02]" style={{ animationDelay: "100ms" }}>
+                    <p className="text-xs text-red-400 mb-1 font-medium">X Axis</p>
+                    <p className="text-xl font-mono font-semibold text-zinc-200">{result?.action[0]?.toFixed(1) ?? "0.0"} <span className="text-xs text-zinc-500">cm</span></p>
+                  </div>
+                  <div className="bg-zinc-900 rounded-lg p-4 transform transition-all hover:scale-[1.02]" style={{ animationDelay: "200ms" }}>
+                    <p className="text-xs text-green-400 mb-1 font-medium">Y Axis</p>
+                    <p className="text-xl font-mono font-semibold text-zinc-200">{result?.action[1]?.toFixed(1) ?? "0.0"} <span className="text-xs text-zinc-500">cm</span></p>
+                  </div>
+                  <div className="bg-zinc-900 rounded-lg p-4 transform transition-all hover:scale-[1.02]" style={{ animationDelay: "300ms" }}>
+                    <p className="text-xs text-blue-400 mb-1 font-medium">Z Axis</p>
+                    <p className="text-xl font-mono font-semibold text-zinc-200">{result?.action[2]?.toFixed(1) ?? "0.0"} <span className="text-xs text-zinc-500">cm</span></p>
+                  </div>
                 </div>
-                <div className="bg-zinc-900 rounded-lg p-4 transform transition-all hover:scale-[1.02]" style={{ animationDelay: "300ms" }}>
-                  <p className="text-xs text-blue-400 mb-1 font-medium">Z Axis</p>
-                  <p className="text-xl font-mono font-semibold text-zinc-200">{result?.action[2]?.toFixed(1) ?? "0.0"} <span className="text-xs text-zinc-500">cm</span></p>
-                </div>
-              </div>
+              )}
 
               {/* Confidence Bar */}
               <div className="bg-zinc-900 rounded-lg p-4">
@@ -421,17 +856,19 @@ export function UploadPage() {
 
               {/* Action Buttons */}
               <div className="flex flex-wrap gap-2">
-                <button className="px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-lg transition-all text-sm font-medium shadow-lg shadow-indigo-500/25 hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2">
+                <button
+                  onClick={() => setShowDetailsModal(true)}
+                  className="px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-lg transition-all text-sm font-medium shadow-lg shadow-indigo-500/25 hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2"
+                >
                   <EyeIcon />
                   View Details
                 </button>
-                <button className="px-4 py-2.5 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-all text-sm hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2">
+                <button
+                  onClick={handleExport}
+                  className="px-4 py-2.5 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-all text-sm hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2"
+                >
                   <ExportIcon />
                   Export
-                </button>
-                <button className="px-4 py-2.5 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-all text-sm hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2">
-                  <CompareIcon />
-                  Compare
                 </button>
               </div>
             </div>
@@ -439,7 +876,7 @@ export function UploadPage() {
             {/* Energy Landscape Visualization */}
             <div className="w-full lg:w-[340px] shrink-0">
               <EnergyLandscape
-                optimalAction={result?.action ?? [0, 0, 0]}
+                optimalAction={(result?.action ?? [0, 0, 0]) as [number, number, number]}
                 onActionSelect={(action, energy) => {
                   console.log("Selected action:", action, "Energy:", energy);
                 }}
@@ -447,21 +884,208 @@ export function UploadPage() {
             </div>
           </div>
         ) : (
-          <div className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="w-20 h-20 rounded-full bg-zinc-900 flex items-center justify-center mb-4">
+          <div className="flex flex-col items-center justify-center py-12 text-center">
+            <div className="w-16 h-16 rounded-full bg-zinc-900 flex items-center justify-center mb-4">
               <ResultsIcon />
             </div>
-            <p className="text-zinc-400 text-sm font-medium">No results yet</p>
-            <p className="text-zinc-600 text-xs mt-2 max-w-xs">Upload images and click Generate Plan to see the optimal action prediction</p>
-            <button
-              onClick={completePlanning}
-              className="mt-4 px-4 py-2 text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-            >
-              (Demo: Show sample results)
-            </button>
+            <p className="text-zinc-300 text-sm font-medium mb-2">Awaiting Planning Results</p>
+            <p className="text-zinc-500 text-xs max-w-sm leading-relaxed">
+              {!currentImage && !goalImage
+                ? "Start by uploading a current state and goal state image above."
+                : !currentImage
+                  ? "Upload a current state image to continue."
+                  : !goalImage
+                    ? "Upload a goal state image to continue."
+                    : "Both images uploaded! Click Generate Plan to predict the optimal action."}
+            </p>
+            {currentImage && goalImage && (
+              <div className="mt-4 flex items-center gap-2 text-xs text-indigo-400">
+                <CheckCircleIcon className="w-4 h-4" />
+                <span>Ready to generate</span>
+              </div>
+            )}
+            {config.enableDemoMode && (
+              <button
+                onClick={completePlanning}
+                className={`mt-4 px-4 py-2 text-xs text-indigo-400 hover:text-indigo-300 transition-colors ${focusRing}`}
+              >
+                (Demo: Show sample results)
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      {/* View Details Modal */}
+      <Modal
+        isOpen={showDetailsModal}
+        onClose={() => setShowDetailsModal(false)}
+        title="Planning Results Details"
+        size="lg"
+      >
+        {result && (
+          <div className="space-y-6">
+            {/* Summary Section */}
+            <div>
+              <h4 className="text-sm font-medium text-zinc-300 mb-3">Summary</h4>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-zinc-900 rounded-lg p-4">
+                  <p className="text-xs text-zinc-500 mb-1">Model Used</p>
+                  <p className="text-sm font-medium text-zinc-200">{loadedModelInfo?.name || loadedModel || "Unknown"}</p>
+                </div>
+                <div className="bg-zinc-900 rounded-lg p-4">
+                  <p className="text-xs text-zinc-500 mb-1">Preset</p>
+                  <p className="text-sm font-medium text-zinc-200 capitalize">{preset}</p>
+                </div>
+                <div className="bg-zinc-900 rounded-lg p-4">
+                  <p className="text-xs text-zinc-500 mb-1">Samples</p>
+                  <p className="text-sm font-medium text-zinc-200">{samples}</p>
+                </div>
+                <div className="bg-zinc-900 rounded-lg p-4">
+                  <p className="text-xs text-zinc-500 mb-1">Iterations</p>
+                  <p className="text-sm font-medium text-zinc-200">{iterations}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Action Vector Section */}
+            <div>
+              <h4 className="text-sm font-medium text-zinc-300 mb-3">
+                Optimal Action Vector {result.isAcModel && <span className="text-xs text-purple-400 ml-2">(7D DROID)</span>}
+              </h4>
+              <div className="bg-zinc-900 rounded-lg p-4">
+                {result.isAcModel ? (
+                  // 7D DROID format display
+                  <>
+                    <div className="grid grid-cols-3 gap-4 mb-3">
+                      <div>
+                        <p className="text-xs text-red-400 mb-1">X (position)</p>
+                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[0]?.toFixed(4)}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-green-400 mb-1">Y (position)</p>
+                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[1]?.toFixed(4)}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-blue-400 mb-1">Z (position)</p>
+                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[2]?.toFixed(4)}</p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-4 gap-4 mb-4">
+                      <div>
+                        <p className="text-xs text-amber-400 mb-1">Roll</p>
+                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[3]?.toFixed(4)}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-purple-400 mb-1">Pitch</p>
+                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[4]?.toFixed(4)}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-cyan-400 mb-1">Yaw</p>
+                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[5]?.toFixed(4)}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-pink-400 mb-1">Gripper</p>
+                        <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[6]?.toFixed(4)}</p>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  // Standard 3D format
+                  <div className="grid grid-cols-3 gap-4 mb-4">
+                    <div>
+                      <p className="text-xs text-red-400 mb-1">X</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[0]?.toFixed(4)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-green-400 mb-1">Y</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[1]?.toFixed(4)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-blue-400 mb-1">Z</p>
+                      <p className="text-lg font-mono font-semibold text-zinc-200">{result.action[2]?.toFixed(4)}</p>
+                    </div>
+                  </div>
+                )}
+                <div className="flex gap-4 text-sm">
+                  <div>
+                    <span className="text-zinc-500">Magnitude: </span>
+                    <span className="text-zinc-200 font-mono">
+                      {Math.sqrt(
+                        result.action.reduce((sum, v) => sum + v * v, 0)
+                      ).toFixed(4)}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Metrics Section */}
+            <div>
+              <h4 className="text-sm font-medium text-zinc-300 mb-3">Metrics</h4>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-zinc-900 rounded-lg p-4">
+                  <p className="text-xs text-zinc-500 mb-1">Final Energy</p>
+                  <p className="text-lg font-semibold text-amber-400">{result.energy?.toFixed(6)}</p>
+                </div>
+                <div className="bg-zinc-900 rounded-lg p-4">
+                  <p className="text-xs text-zinc-500 mb-1">Confidence</p>
+                  <p className="text-lg font-semibold text-green-400">{(result.confidence * 100).toFixed(2)}%</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Energy History Section */}
+            {result.energyHistory && result.energyHistory.length > 0 && (
+              <div>
+                <h4 className="text-sm font-medium text-zinc-300 mb-3">Energy Convergence</h4>
+                <div className="bg-zinc-900 rounded-lg p-4">
+                  <div className="h-32 flex items-end gap-1">
+                    {result.energyHistory.map((energy, i) => {
+                      const maxEnergy = Math.max(...result.energyHistory!);
+                      const height = (energy / maxEnergy) * 100;
+                      return (
+                        <div
+                          key={i}
+                          className="flex-1 bg-gradient-to-t from-indigo-600 to-purple-500 rounded-t opacity-80 hover:opacity-100 transition-opacity"
+                          style={{ height: `${height}%` }}
+                          title={`Iteration ${i + 1}: ${energy.toFixed(4)}`}
+                        />
+                      );
+                    })}
+                  </div>
+                  <div className="flex justify-between text-xs text-zinc-500 mt-2">
+                    <span>Iteration 1</span>
+                    <span>Iteration {result.energyHistory.length}</span>
+                  </div>
+                  <div className="mt-3 text-xs text-zinc-400">
+                    <span>Initial: {result.energyHistory[0]?.toFixed(4)} → Final: {result.energyHistory[result.energyHistory.length - 1]?.toFixed(4)}</span>
+                    <span className="text-green-400 ml-2">
+                      ({((1 - result.energyHistory[result.energyHistory.length - 1] / result.energyHistory[0]) * 100).toFixed(1)}% reduction)
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex justify-end gap-2 pt-4 border-t border-zinc-700">
+              <button
+                onClick={handleExport}
+                className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg text-sm transition-colors"
+              >
+                Export JSON
+              </button>
+              <button
+                onClick={() => setShowDetailsModal(false)}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </>
   );
 }

@@ -5,7 +5,8 @@ from typing import List, Dict
 from datetime import datetime
 from pydantic import BaseModel
 
-from app.services.dummy_metrics import dummy_metrics
+from app.services.metrics import dummy_metrics
+from app.config import settings
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -113,4 +114,30 @@ async def get_gpu_status():
                 "fan_speed_percent": min(100, 30 + gpu.temperature_celsius * 0.8),
             }
         ],
+    }
+
+
+@router.get("/device")
+async def get_device_info():
+    """
+    Get compute device information for V-JEPA2 inference.
+
+    Returns details about available hardware (MPS/CUDA/CPU)
+    and recommendations for model selection.
+    """
+    # Import here to avoid circular imports and slow startup
+    from app.services.vjepa2 import get_system_info
+    return get_system_info()
+
+
+@router.get("/config")
+async def get_app_config():
+    """Get current application configuration."""
+    return {
+        "inference_mode": settings.inference_mode,
+        "default_model": settings.default_model,
+        "default_samples": settings.default_samples,
+        "default_iterations": settings.default_iterations,
+        "use_fp16": settings.use_fp16,
+        "max_batch_size": settings.max_batch_size,
     }

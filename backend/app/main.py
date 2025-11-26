@@ -12,8 +12,7 @@ from app.api.routes import (
     video, trajectory, compare, presets, analytics
 )
 from app.api.websocket import ws_manager
-from app.services.dummy_planner import dummy_planner
-from app.services.dummy_download import dummy_download
+from app.services.planner import planner
 
 # Configure logging
 logging.basicConfig(
@@ -30,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Create FastAPI app
 app = FastAPI(
     title="V-JEPA2 Planning API",
-    description="Backend API for V-JEPA2 action planning demo",
+    description="Backend API for V-JEPA2 action planning demo with real inference",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -64,7 +63,8 @@ app.include_router(analytics.router, prefix="/api")
 @app.on_event("startup")
 async def startup_event():
     """Log startup information."""
-    logger.info(f"Starting V-JEPA2 API server (mode: {'dummy' if settings.dummy_mode else 'production'})")
+    logger.info(f"Starting V-JEPA2 API server with real inference")
+    logger.info(f"Default model: {settings.default_model}")
     logger.info(f"CORS origins: {settings.cors_origins}")
 
 
@@ -78,7 +78,7 @@ async def websocket_planning(websocket: WebSocket, task_id: str):
     Messages are JSON with format: {"type": "progress|completed|error", "data": {...}}
     """
     # Check if task exists
-    task = dummy_planner.get_task(task_id)
+    task = planner.get_task(task_id)
     if not task:
         await websocket.close(code=4004, reason="Task not found")
         return
@@ -86,7 +86,7 @@ async def websocket_planning(websocket: WebSocket, task_id: str):
     await ws_manager.connect(task_id, websocket)
 
     try:
-        # If task already completed, send result immediately
+        # Send current state immediately based on task status
         if task.status == "completed" and task.result:
             await websocket.send_json({
                 "type": "completed",
@@ -99,13 +99,19 @@ async def websocket_planning(websocket: WebSocket, task_id: str):
             })
         elif task.status == "cancelled":
             await websocket.send_json({"type": "cancelled", "data": {}})
+        elif task.status == "running" and task.progress:
+            # Send current progress (including loading_model status)
+            await websocket.send_json({
+                "type": "progress",
+                "data": task.progress.model_dump()
+            })
 
         # Keep connection open to receive updates
         while True:
             # Wait for messages from client (ping/pong, cancel requests)
             data = await websocket.receive_text()
             if data == "cancel":
-                dummy_planner.cancel_task(task_id)
+                planner.cancel_task(task_id)
                 await websocket.send_json({"type": "cancelled", "data": {}})
                 break
 
@@ -121,7 +127,8 @@ async def root():
     return {
         "name": "V-JEPA2 Planning API",
         "version": "1.0.0",
-        "mode": "dummy" if settings.dummy_mode else "production",
+        "mode": "real",
+        "default_model": settings.default_model,
         "docs": "/docs",
     }
 

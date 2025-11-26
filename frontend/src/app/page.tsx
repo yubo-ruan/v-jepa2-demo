@@ -5,11 +5,11 @@ import { Header, Sidebar } from "@/components/layout";
 import { UploadPage, ConfigPage, HistoryPage } from "@/components/pages";
 import { ResearchDashboard, type ResearchTab } from "@/components/research/ResearchDashboard";
 import { Toast } from "@/components/ui";
-import { ToastProvider, ConfigProvider, PlanningProvider, useToast } from "@/contexts";
+import { ToastProvider, ConfigProvider, PlanningProvider, ModelsProvider, useToast } from "@/contexts";
 import type { MainTab } from "@/types";
 
 function MainContent() {
-  const [activeTab, setActiveTab] = useState<MainTab>("upload");
+  const [activeTab, setActiveTab] = useState<MainTab>("inference");
   const [researchTab, setResearchTab] = useState<ResearchTab>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const { toast } = useToast();
@@ -27,17 +27,17 @@ function MainContent() {
 
         <main className="flex-1 bg-zinc-900 p-8 overflow-auto">
           {/* Toast Notification */}
-          <Toast message={toast.message} visible={toast.visible} />
+          <Toast message={toast.message} visible={toast.visible} type={toast.type} />
 
-          {activeTab === "upload" && <UploadPage />}
+          {activeTab === "inference" && <UploadPage onGoToConfig={() => setActiveTab("config")} />}
 
           {activeTab === "config" && <ConfigPage />}
 
           {activeTab === "history" && (
-            <HistoryPage onGoToUpload={() => setActiveTab("upload")} />
+            <HistoryPage onGoToUpload={() => setActiveTab("inference")} />
           )}
 
-          {activeTab === "research" && (
+          {activeTab === "finetune" && (
             <ResearchDashboard
               activeTab={researchTab}
               onTabChange={setResearchTab}
@@ -53,9 +53,11 @@ export default function Home() {
   return (
     <ToastProvider>
       <ConfigProvider>
-        <PlanningProvider>
-          <MainContent />
-        </PlanningProvider>
+        <ModelsProvider>
+          <PlanningProvider>
+            <MainContent />
+          </PlanningProvider>
+        </ModelsProvider>
       </ConfigProvider>
     </ToastProvider>
   );

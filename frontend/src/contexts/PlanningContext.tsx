@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, useMemo, useRef, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useMemo, useRef, useEffect, type ReactNode } from "react";
 import type { PlanningState, PresetType } from "@/types";
 import { planningPresets, defaultPlanningState } from "@/constants/sampleData";
 import { api, type PlanningProgress, type ActionResult } from "@/lib/api";
@@ -11,6 +11,9 @@ interface ExtendedPlanningState extends PlanningState {
   progress: PlanningProgress | null;
   result: ActionResult | null;
   error: string | null;
+  // Store upload IDs for backend reference
+  currentImageUploadId: string | null;
+  goalImageUploadId: string | null;
 }
 
 interface PlanningContextType {
@@ -20,10 +23,10 @@ interface PlanningContextType {
   setIterations: (iterations: number) => void;
   setCurrentImage: (image: string | null) => void;
   setGoalImage: (image: string | null) => void;
-  setModel: (model: string) => void;
-  startPlanning: () => Promise<void>;
+  startPlanning: (model: string) => Promise<void>;
   cancelPlanning: () => Promise<void>;
   completePlanning: () => void;
+  clearError: () => void;
   reset: () => void;
   canGenerate: boolean;
   estimatedTime: number;
@@ -42,12 +45,23 @@ const DEFAULT_STATE: ExtendedPlanningState = {
   progress: null,
   result: null,
   error: null,
+  currentImageUploadId: null,
+  goalImageUploadId: null,
 };
 
 export function PlanningProvider({ children }: { children: ReactNode }) {
   const [planningState, setPlanningState] = useState<ExtendedPlanningState>(DEFAULT_STATE);
-  const [model, setModelState] = useState("vit-giant");
   const wsRef = useRef<{ ws: WebSocket; cancel: () => void } | null>(null);
+
+  // Cleanup WebSocket on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.ws.close();
+        wsRef.current = null;
+      }
+    };
+  }, []);
 
   const setPreset = useCallback((preset: PresetType) => {
     const presetConfig = planningPresets.find((p) => p.id === preset);
@@ -70,19 +84,25 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setCurrentImage = useCallback((currentImage: string | null) => {
-    setPlanningState((prev) => ({ ...prev, currentImage }));
+    setPlanningState((prev) => ({
+      ...prev,
+      currentImage,
+      // Clear upload ID when image changes
+      currentImageUploadId: prev.currentImage !== currentImage ? null : prev.currentImageUploadId,
+    }));
   }, []);
 
   const setGoalImage = useCallback((goalImage: string | null) => {
-    setPlanningState((prev) => ({ ...prev, goalImage }));
+    setPlanningState((prev) => ({
+      ...prev,
+      goalImage,
+      // Clear upload ID when image changes
+      goalImageUploadId: prev.goalImage !== goalImage ? null : prev.goalImageUploadId,
+    }));
   }, []);
 
-  const setModel = useCallback((newModel: string) => {
-    setModelState(newModel);
-  }, []);
-
-  const startPlanning = useCallback(async () => {
-    const { currentImage, goalImage, samples, iterations } = planningState;
+  const startPlanning = useCallback(async (model: string) => {
+    const { currentImage, goalImage, samples, iterations, currentImageUploadId, goalImageUploadId } = planningState;
 
     if (!currentImage || !goalImage) {
       return;
@@ -100,10 +120,60 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
     }));
 
     try {
+      // Upload images if not already uploaded (blob URLs need to be uploaded)
+      let currentUploadId = currentImageUploadId;
+      let goalUploadId = goalImageUploadId;
+
+      console.log('[PlanningContext] Starting planning with images:', {
+        currentImage: currentImage?.substring(0, 50),
+        goalImage: goalImage?.substring(0, 50),
+        currentUploadId,
+        goalUploadId,
+      });
+
+      // Upload current image if it's a blob URL
+      if (currentImage.startsWith("blob:")) {
+        if (!currentUploadId) {
+          console.log('[PlanningContext] Uploading current image blob...');
+          const response = await fetch(currentImage);
+          const blob = await response.blob();
+          const file = new File([blob], "current.jpg", { type: blob.type || "image/jpeg" });
+          const uploadResult = await api.uploadImage(file);
+          currentUploadId = uploadResult.uploadId;
+          console.log('[PlanningContext] Current image uploaded:', currentUploadId);
+          setPlanningState((prev) => ({ ...prev, currentImageUploadId: currentUploadId }));
+        }
+      }
+
+      // Upload goal image if it's a blob URL
+      if (goalImage.startsWith("blob:")) {
+        if (!goalUploadId) {
+          console.log('[PlanningContext] Uploading goal image blob...');
+          const response = await fetch(goalImage);
+          const blob = await response.blob();
+          const file = new File([blob], "goal.jpg", { type: blob.type || "image/jpeg" });
+          const uploadResult = await api.uploadImage(file);
+          goalUploadId = uploadResult.uploadId;
+          console.log('[PlanningContext] Goal image uploaded:', goalUploadId);
+          setPlanningState((prev) => ({ ...prev, goalImageUploadId: goalUploadId }));
+        }
+      }
+
+      // Use upload IDs for planning (must be upload IDs, not blob URLs)
+      const currentImageRef = currentUploadId || currentImage;
+      const goalImageRef = goalUploadId || goalImage;
+
+      // Validate that we have valid references (not blob URLs)
+      if (currentImageRef.startsWith("blob:") || goalImageRef.startsWith("blob:")) {
+        throw new Error("Images must be uploaded to the backend before planning. Please try uploading again.");
+      }
+
+      console.log('[PlanningContext] Starting planning with refs:', { currentImageRef, goalImageRef, model });
+
       // Start planning task on backend
       const { taskId } = await api.startPlanning({
-        currentImage,
-        goalImage,
+        currentImage: currentImageRef,
+        goalImage: goalImageRef,
         model,
         samples,
         iterations,
@@ -150,7 +220,7 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
         error: error instanceof Error ? error.message : "Failed to start planning",
       }));
     }
-  }, [planningState, model]);
+  }, [planningState]);
 
   const cancelPlanning = useCallback(async () => {
     const { taskId } = planningState;
@@ -189,6 +259,10 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  const clearError = useCallback(() => {
+    setPlanningState((prev) => ({ ...prev, error: null }));
+  }, []);
+
   const reset = useCallback(() => {
     // Clean up WebSocket
     if (wsRef.current) {
@@ -221,10 +295,10 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       setIterations,
       setCurrentImage,
       setGoalImage,
-      setModel,
       startPlanning,
       cancelPlanning,
       completePlanning,
+      clearError,
       reset,
       canGenerate,
       estimatedTime,
@@ -237,10 +311,10 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       setIterations,
       setCurrentImage,
       setGoalImage,
-      setModel,
       startPlanning,
       cancelPlanning,
       completePlanning,
+      clearError,
       reset,
       canGenerate,
       estimatedTime,

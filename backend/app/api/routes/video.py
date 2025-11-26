@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import logging
+import time
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -16,6 +17,13 @@ from app.api.websocket import ws_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/video", tags=["video"])
+
+# TTL for video data in seconds (30 minutes)
+VIDEO_TTL_SECONDS = 1800
+# Max number of videos to keep (to prevent unbounded growth)
+MAX_VIDEOS = 50
+# Max number of frames to keep
+MAX_FRAMES = 500
 
 
 class VideoInfo(BaseModel):
@@ -60,6 +68,66 @@ class ExtractionTask(BaseModel):
 _videos: Dict[str, VideoInfo] = {}
 _extractions: Dict[str, ExtractionTask] = {}
 _frame_data: Dict[str, bytes] = {}  # frame_id -> image bytes
+_frame_created_at: Dict[str, float] = {}  # frame_id -> timestamp for cleanup
+
+
+def _cleanup_old_data():
+    """Remove videos and frames older than TTL or if exceeding max count."""
+    current_time = time.time()
+
+    # Remove expired videos and their associated frames/extractions
+    expired_video_ids = [
+        vid for vid, info in _videos.items()
+        if (current_time - info.uploaded_at.timestamp()) > VIDEO_TTL_SECONDS
+    ]
+    for vid in expired_video_ids:
+        _delete_video_data(vid)
+        logger.debug(f"Cleaned up expired video: {vid}")
+
+    # If still over limit, remove oldest videos
+    if len(_videos) > MAX_VIDEOS:
+        sorted_videos = sorted(
+            _videos.items(),
+            key=lambda x: x[1].uploaded_at.timestamp()
+        )
+        to_remove = len(_videos) - MAX_VIDEOS
+        for vid, _ in sorted_videos[:to_remove]:
+            _delete_video_data(vid)
+            logger.debug(f"Cleaned up old video (over limit): {vid}")
+
+    # Clean up orphaned frames (not associated with any extraction)
+    if len(_frame_data) > MAX_FRAMES:
+        # Get all frame IDs from active extractions
+        active_frame_ids = set()
+        for task in _extractions.values():
+            for frame in task.frames:
+                active_frame_ids.add(frame.frame_id)
+
+        # Find orphaned frames
+        orphaned = [fid for fid in _frame_data.keys() if fid not in active_frame_ids]
+        # Sort by creation time and remove oldest
+        orphaned_sorted = sorted(
+            orphaned,
+            key=lambda fid: _frame_created_at.get(fid, 0)
+        )
+        to_remove = len(_frame_data) - MAX_FRAMES
+        for fid in orphaned_sorted[:to_remove]:
+            _frame_data.pop(fid, None)
+            _frame_created_at.pop(fid, None)
+            logger.debug(f"Cleaned up orphaned frame: {fid}")
+
+
+def _delete_video_data(video_id: str):
+    """Delete a video and all associated extractions and frames."""
+    # Clean up related extractions and frames
+    for task_id, task in list(_extractions.items()):
+        if task.video_id == video_id:
+            for frame in task.frames:
+                _frame_data.pop(frame.frame_id, None)
+                _frame_created_at.pop(frame.frame_id, None)
+            del _extractions[task_id]
+
+    _videos.pop(video_id, None)
 
 
 # Simulated video data for demo
@@ -123,6 +191,9 @@ async def upload_video(file: UploadFile = File(...)):
 
     if len(content) > 100 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Video too large. Max size: 100MB")
+
+    # Cleanup old data before adding new
+    _cleanup_old_data()
 
     # Generate simulated video info
     video_info = _generate_dummy_video_info(file.filename or "video.mp4")
@@ -220,6 +291,7 @@ async def _run_extraction(task_id: str, video: VideoInfo, request: FrameExtracti
         # Generate dummy frame
         frame_bytes = _generate_dummy_frame(frame_num)
         _frame_data[frame_id] = frame_bytes
+        _frame_created_at[frame_id] = time.time()
 
         frame = ExtractedFrame(
             frame_id=frame_id,
@@ -277,13 +349,6 @@ async def delete_video(video_id: str):
     if video_id not in _videos:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    # Clean up related extractions and frames
-    for task_id, task in list(_extractions.items()):
-        if task.video_id == video_id:
-            for frame in task.frames:
-                _frame_data.pop(frame.frame_id, None)
-            del _extractions[task_id]
-
-    del _videos[video_id]
+    _delete_video_data(video_id)
 
     return {"status": "deleted", "video_id": video_id}

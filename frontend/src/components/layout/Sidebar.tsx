@@ -17,10 +17,10 @@ interface SidebarProps {
 
 export function Sidebar({ isOpen, activeTab, onTabChange }: SidebarProps) {
   const navTabs = useMemo(() => [
-    { id: "upload" as const, label: "Upload", icon: <UploadIcon /> },
+    { id: "inference" as const, label: "Inference", icon: <UploadIcon /> },
     { id: "config" as const, label: "Config", icon: <ConfigIcon /> },
     { id: "history" as const, label: "History", icon: <HistoryIcon /> },
-    { id: "research" as const, label: "Research", icon: <ResearchIcon /> },
+    { id: "finetune" as const, label: "Fine-tune", icon: <ResearchIcon /> },
   ], []);
 
   return (

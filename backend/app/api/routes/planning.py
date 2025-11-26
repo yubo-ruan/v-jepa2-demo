@@ -10,7 +10,7 @@ from app.models.schemas import (
     PlanningResultResponse,
     PlanningProgress,
 )
-from app.services.dummy_planner import dummy_planner
+from app.services.planner import planner
 from app.api.websocket import ws_manager
 from app.config import settings
 
@@ -27,7 +27,7 @@ async def _run_planning_with_ws(task_id: str):
         await ws_manager.broadcast_progress(task_id, progress.model_dump())
 
     try:
-        result = await dummy_planner.run_planning(task_id, progress_callback)
+        result = await planner.run_planning(task_id, progress_callback)
         await ws_manager.broadcast_completed(task_id, result.model_dump())
     except asyncio.CancelledError:
         await ws_manager.broadcast_cancelled(task_id)
@@ -48,7 +48,7 @@ async def create_planning_task(request: PlanningRequest):
     - Poll for status via GET /api/plan/{task_id}
     - Subscribe to real-time updates via WebSocket /ws/plan/{task_id}
     """
-    task_id = dummy_planner.create_task(request)
+    task_id = planner.create_task(request)
 
     # Start background task
     bg_task = asyncio.create_task(_run_planning_with_ws(task_id))
@@ -64,7 +64,7 @@ async def create_planning_task(request: PlanningRequest):
 @router.get("/{task_id}", response_model=PlanningResultResponse)
 async def get_planning_status(task_id: str):
     """Get the current status and result of a planning task."""
-    task = dummy_planner.get_task(task_id)
+    task = planner.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -80,14 +80,14 @@ async def get_planning_status(task_id: str):
 @router.post("/{task_id}/cancel")
 async def cancel_planning_task(task_id: str):
     """Cancel a running planning task."""
-    task = dummy_planner.get_task(task_id)
+    task = planner.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
     if task.status != "running":
         raise HTTPException(status_code=400, detail=f"Cannot cancel task with status: {task.status}")
 
-    success = dummy_planner.cancel_task(task_id)
+    success = planner.cancel_task(task_id)
     if not success:
         raise HTTPException(status_code=400, detail="Failed to cancel task")
 

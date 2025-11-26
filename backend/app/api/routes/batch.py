@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.models.schemas import PlanningRequest, ActionResult
-from app.services.dummy_planner import dummy_planner, PlanningTask
+from app.services.planner import planner, PlanningTask
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ async def create_batch(request: BatchPlanningRequest):
     task_statuses = []
 
     for i, task_req in enumerate(request.tasks):
-        task_id = dummy_planner.create_task(task_req)
+        task_id = planner.create_task(task_req)
         task_ids.append(task_id)
         task_statuses.append(BatchTaskStatus(
             task_id=task_id,
@@ -150,7 +150,7 @@ async def _run_single_task(batch_id: str, task_id: str, index: int) -> None:
 
         # Run with timeout
         result = await asyncio.wait_for(
-            dummy_planner.run_planning(task_id, on_progress),
+            planner.run_planning(task_id, on_progress),
             timeout=timeout
         )
         task_status.status = "completed"
@@ -191,7 +191,7 @@ async def cancel_batch(batch_id: str):
 
     cancelled = 0
     for task_id in task_ids:
-        if dummy_planner.cancel_task(task_id):
+        if planner.cancel_task(task_id):
             cancelled += 1
 
     return {

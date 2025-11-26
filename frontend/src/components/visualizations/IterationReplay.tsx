@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { PlayIcon, PauseIcon, StopIcon, ExportIcon, ChevronIcon } from "@/components/icons";
 import { getProgressColorHex } from "@/utils/colors";
-import { ITERATION_REPLAY, ANIMATION } from "@/constants/visualization";
+import { ITERATION_REPLAY } from "@/constants/visualization";
+import { useExportAnimation, type ExportFormat } from "@/hooks";
 
 interface IterationData {
   iteration: number;
@@ -109,6 +110,13 @@ export function IterationReplay({
   const [hoveredIteration, setHoveredIteration] = useState<number | null>(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
 
+  // Refs for SVG elements
+  const distributionSvgRef = useRef<SVGSVGElement>(null);
+  const energySvgRef = useRef<SVGSVGElement>(null);
+
+  // Export animation hook
+  const { exportAnimation, isExporting, exportProgress } = useExportAnimation();
+
   // Generate or use provided iteration data
   const iterations = useMemo(
     () => providedIterations || generateMockData(totalIterations, totalSamples, eliteFraction),
@@ -191,6 +199,264 @@ export function IterationReplay({
   // Energy chart bounds
   const maxEnergy = Math.max(...iterations.map(d => d.bestEnergy));
   const minEnergy = Math.min(...iterations.map(d => d.bestEnergy));
+
+  // Render a single frame to canvas (for export)
+  const renderFrameToCanvas = useCallback(
+    async (frameIndex: number): Promise<HTMLCanvasElement> => {
+      const width = 800;
+      const height = 600;
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Could not get canvas context");
+
+      // Background
+      ctx.fillStyle = "#18181b";
+      ctx.fillRect(0, 0, width, height);
+
+      const frameData = iterations[frameIndex];
+      const frameEnergyHistory = iterations.slice(0, frameIndex + 1).map(d => d.bestEnergy);
+      const padding = 40;
+
+      // Title
+      ctx.fillStyle = "#d4d4d8";
+      ctx.font = "bold 20px system-ui";
+      ctx.fillText(`V-JEPA2 CEM Optimization - Iteration ${frameIndex + 1}/${iterations.length}`, padding, 30);
+
+      // === LEFT SIDE: Sample Distribution ===
+      const distX = padding;
+      const distY = 60;
+      const distW = 350;
+      const distH = 350;
+
+      // Distribution background
+      ctx.fillStyle = "#27272a";
+      ctx.fillRect(distX, distY, distW, distH);
+
+      // Distribution title
+      ctx.fillStyle = "#a1a1aa";
+      ctx.font = "14px system-ui";
+      ctx.fillText("Sample Distribution (X-Y plane)", distX, distY - 10);
+
+      // Grid
+      ctx.strokeStyle = "#3f3f46";
+      ctx.lineWidth = 0.5;
+      const gridSize = 35;
+      for (let x = distX; x <= distX + distW; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, distY);
+        ctx.lineTo(x, distY + distH);
+        ctx.stroke();
+      }
+      for (let y = distY; y <= distY + distH; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(distX, y);
+        ctx.lineTo(distX + distW, y);
+        ctx.stroke();
+      }
+
+      // Map sample coordinates to canvas
+      const mapSampleToCanvas = (x: number, y: number) => {
+        const innerPadding = 20;
+        const canvasX = distX + innerPadding + ((x - bounds.minX) / (bounds.maxX - bounds.minX)) * (distW - 2 * innerPadding);
+        const canvasY = distY + innerPadding + ((bounds.maxY - y) / (bounds.maxY - bounds.minY)) * (distH - 2 * innerPadding);
+        return { x: canvasX, y: canvasY };
+      };
+
+      // Draw samples
+      frameData.samples.forEach((sample) => {
+        const pos = mapSampleToCanvas(sample.x, sample.y);
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, sample.isElite ? 6 : 3, 0, Math.PI * 2);
+        ctx.fillStyle = sample.isElite ? "#22c55e" : "rgba(99, 102, 241, 0.5)";
+        ctx.fill();
+      });
+
+      // Draw mean
+      const meanPos = mapSampleToCanvas(frameData.mean[0], frameData.mean[1]);
+      ctx.beginPath();
+      ctx.arc(meanPos.x, meanPos.y, 10, 0, Math.PI * 2);
+      ctx.strokeStyle = "#f59e0b";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(meanPos.x, meanPos.y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = "#f59e0b";
+      ctx.fill();
+
+      // Legend
+      ctx.fillStyle = "#71717a";
+      ctx.font = "12px system-ui";
+      const legendY = distY + distH + 25;
+      ctx.beginPath();
+      ctx.arc(distX + 10, legendY, 4, 0, Math.PI * 2);
+      ctx.fillStyle = "#6366f1";
+      ctx.fill();
+      ctx.fillStyle = "#71717a";
+      ctx.fillText("Samples", distX + 20, legendY + 4);
+
+      ctx.beginPath();
+      ctx.arc(distX + 100, legendY, 4, 0, Math.PI * 2);
+      ctx.fillStyle = "#22c55e";
+      ctx.fill();
+      ctx.fillStyle = "#71717a";
+      ctx.fillText("Elites", distX + 110, legendY + 4);
+
+      ctx.beginPath();
+      ctx.arc(distX + 180, legendY, 6, 0, Math.PI * 2);
+      ctx.strokeStyle = "#f59e0b";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = "#71717a";
+      ctx.fillText("Mean", distX + 195, legendY + 4);
+
+      // === RIGHT SIDE: Energy Chart ===
+      const chartX = 420;
+      const chartY = 60;
+      const chartW = 340;
+      const chartH = 200;
+
+      // Chart background
+      ctx.fillStyle = "#27272a";
+      ctx.fillRect(chartX, chartY, chartW, chartH);
+
+      // Chart title
+      ctx.fillStyle = "#a1a1aa";
+      ctx.font = "14px system-ui";
+      ctx.fillText("Energy Evolution", chartX, chartY - 10);
+
+      // Axes
+      ctx.strokeStyle = "#52525b";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(chartX + 30, chartY);
+      ctx.lineTo(chartX + 30, chartY + chartH - 20);
+      ctx.lineTo(chartX + chartW, chartY + chartH - 20);
+      ctx.stroke();
+
+      // Y-axis labels
+      ctx.fillStyle = "#71717a";
+      ctx.font = "10px system-ui";
+      ctx.fillText(maxEnergy.toFixed(1), chartX + 2, chartY + 15);
+      ctx.fillText(minEnergy.toFixed(1), chartX + 2, chartY + chartH - 25);
+
+      // X-axis labels
+      ctx.fillText("1", chartX + 30, chartY + chartH - 5);
+      ctx.fillText(String(iterations.length), chartX + chartW - 15, chartY + chartH - 5);
+
+      // Draw energy line
+      const innerChartW = chartW - 40;
+      const innerChartH = chartH - 40;
+      const chartInnerX = chartX + 35;
+      const chartInnerY = chartY + 10;
+
+      ctx.lineWidth = 2.5;
+      ctx.lineCap = "round";
+
+      for (let i = 1; i < frameEnergyHistory.length; i++) {
+        const x1 = chartInnerX + ((i - 1) / (iterations.length - 1)) * innerChartW;
+        const y1 = chartInnerY + ((maxEnergy - frameEnergyHistory[i - 1]) / (maxEnergy - minEnergy)) * innerChartH;
+        const x2 = chartInnerX + (i / (iterations.length - 1)) * innerChartW;
+        const y2 = chartInnerY + ((maxEnergy - frameEnergyHistory[i]) / (maxEnergy - minEnergy)) * innerChartH;
+
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = getProgressColorHex(i / (iterations.length - 1));
+        ctx.stroke();
+      }
+
+      // Draw points
+      for (let i = 0; i < frameEnergyHistory.length; i++) {
+        const x = chartInnerX + (i / (iterations.length - 1)) * innerChartW;
+        const y = chartInnerY + ((maxEnergy - frameEnergyHistory[i]) / (maxEnergy - minEnergy)) * innerChartH;
+
+        ctx.beginPath();
+        ctx.arc(x, y, i === frameIndex ? 6 : 4, 0, Math.PI * 2);
+        ctx.fillStyle = getProgressColorHex(i / (iterations.length - 1));
+        ctx.fill();
+
+        if (i === frameIndex) {
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+
+      // === STATS SECTION ===
+      const statsY = 290;
+      ctx.fillStyle = "#27272a";
+      ctx.fillRect(chartX, statsY, chartW, 120);
+
+      ctx.fillStyle = "#a1a1aa";
+      ctx.font = "14px system-ui";
+      ctx.fillText("Current State", chartX + 10, statsY + 20);
+
+      ctx.font = "12px system-ui";
+      ctx.fillStyle = "#71717a";
+      ctx.fillText("Mean Action:", chartX + 10, statsY + 45);
+      ctx.fillStyle = "#d4d4d8";
+      ctx.font = "12px monospace";
+      ctx.fillText(`[${frameData.mean.map(v => v.toFixed(2)).join(", ")}]`, chartX + 100, statsY + 45);
+
+      ctx.font = "12px system-ui";
+      ctx.fillStyle = "#71717a";
+      ctx.fillText("Std Dev:", chartX + 10, statsY + 65);
+      ctx.fillStyle = "#d4d4d8";
+      ctx.font = "12px monospace";
+      ctx.fillText(frameData.stdDev.toFixed(3), chartX + 100, statsY + 65);
+
+      ctx.font = "12px system-ui";
+      ctx.fillStyle = "#71717a";
+      ctx.fillText("Best Energy:", chartX + 10, statsY + 85);
+      ctx.fillStyle = "#22c55e";
+      ctx.font = "12px monospace";
+      ctx.fillText(frameData.bestEnergy.toFixed(3), chartX + 100, statsY + 85);
+
+      ctx.font = "12px system-ui";
+      ctx.fillStyle = "#71717a";
+      ctx.fillText("Elite Count:", chartX + 10, statsY + 105);
+      ctx.fillStyle = "#d4d4d8";
+      ctx.font = "12px monospace";
+      ctx.fillText(`${frameData.eliteCount} / ${frameData.totalSamples}`, chartX + 100, statsY + 105);
+
+      // Footer
+      ctx.fillStyle = "#52525b";
+      ctx.font = "11px system-ui";
+      ctx.fillText("V-JEPA2 Demo - CEM Optimization Visualization", padding, height - 15);
+
+      return canvas;
+    },
+    [iterations, bounds, maxEnergy, minEnergy]
+  );
+
+  // Export handler
+  const handleExport = useCallback(
+    async (format: ExportFormat) => {
+      setShowExportMenu(false);
+      setIsPlaying(false);
+
+      try {
+        await exportAnimation(
+          renderFrameToCanvas,
+          iterations.length,
+          format,
+          {
+            filename: `vjepa2-cem-animation`,
+            width: 800,
+            height: 600,
+            fps: 2,
+            quality: 10,
+          }
+        );
+      } catch (error) {
+        console.error("Export failed:", error);
+        alert(`Export failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
+    },
+    [exportAnimation, renderFrameToCanvas, iterations.length]
+  );
 
   return (
     <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
@@ -497,35 +763,44 @@ export function IterationReplay({
         <div className="flex gap-2 relative">
           <button
             onClick={() => setShowExportMenu(!showExportMenu)}
-            className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-colors text-sm flex items-center gap-2"
+            disabled={isExporting}
+            className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors text-sm flex items-center gap-2"
           >
             <ExportIcon />
-            Export Animation
-            <ChevronIcon className={`w-3 h-3 transition-transform ${showExportMenu ? "rotate-180" : ""}`} />
+            {isExporting ? (
+              <>
+                Exporting... {exportProgress?.progress ?? 0}%
+              </>
+            ) : (
+              <>
+                Export Animation
+                <ChevronIcon className={`w-3 h-3 transition-transform ${showExportMenu ? "rotate-180" : ""}`} />
+              </>
+            )}
           </button>
           {/* Export format dropdown */}
-          {showExportMenu && (
+          {showExportMenu && !isExporting && (
             <div className="absolute bottom-full right-0 mb-2 bg-zinc-700 rounded-lg shadow-xl border border-zinc-600 overflow-hidden z-20">
               <button
-                onClick={() => { setShowExportMenu(false); alert("Exporting as GIF..."); }}
+                onClick={() => handleExport("gif")}
                 className="w-full px-4 py-2 text-left text-sm text-zinc-200 hover:bg-zinc-600 flex items-center gap-2"
               >
                 <span className="w-4 text-center">🎞️</span>
                 GIF <span className="text-zinc-400 text-xs ml-auto">web-friendly</span>
               </button>
               <button
-                onClick={() => { setShowExportMenu(false); alert("Exporting as MP4..."); }}
+                onClick={() => handleExport("webm")}
                 className="w-full px-4 py-2 text-left text-sm text-zinc-200 hover:bg-zinc-600 flex items-center gap-2"
               >
                 <span className="w-4 text-center">🎬</span>
-                MP4 <span className="text-zinc-400 text-xs ml-auto">high quality</span>
+                WebM <span className="text-zinc-400 text-xs ml-auto">video</span>
               </button>
               <button
-                onClick={() => { setShowExportMenu(false); alert("Exporting as PNG sequence..."); }}
+                onClick={() => handleExport("png-sequence")}
                 className="w-full px-4 py-2 text-left text-sm text-zinc-200 hover:bg-zinc-600 flex items-center gap-2"
               >
                 <span className="w-4 text-center">📁</span>
-                PNG Sequence <span className="text-zinc-400 text-xs ml-auto">frames</span>
+                PNG Sequence <span className="text-zinc-400 text-xs ml-auto">zip</span>
               </button>
             </div>
           )}

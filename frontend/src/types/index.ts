@@ -58,7 +58,7 @@ export interface PlanningResult {
 }
 
 // Tab types
-export type MainTab = "upload" | "config" | "history" | "research";
+export type MainTab = "inference" | "config" | "history" | "finetune";
 export type ConfigTab = "model" | "ui" | "advanced";
 
 // Filter/Sort types for History

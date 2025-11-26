@@ -161,9 +161,9 @@ export function EnergyLandscape({ optimalAction, onActionSelect }: EnergyLandsca
   }, []);
 
   return (
-    <div className="bg-zinc-900 rounded-xl border border-zinc-700 p-4">
+    <div className="bg-zinc-900 rounded-xl border border-zinc-700 p-3 sm:p-4">
       {/* Header */}
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
         <h4 className="text-sm font-semibold text-zinc-300">Energy Landscape</h4>
         <div className="flex gap-2">
           <button
@@ -197,22 +197,22 @@ export function EnergyLandscape({ optimalAction, onActionSelect }: EnergyLandsca
       {viewMode === "2D" ? (
         <>
           {/* 2D Heatmap */}
-          <div className="relative">
+          <div className="relative pl-6 sm:pl-8">
             {/* Y-axis label */}
-            <div className="absolute -left-6 top-1/2 -translate-y-1/2 -rotate-90 text-xs text-zinc-500 font-medium">
+            <div className="absolute left-0 top-1/2 -translate-y-1/2 -rotate-90 text-xs text-zinc-500 font-medium whitespace-nowrap">
               {axisLabels.y} (cm)
             </div>
 
-            {/* Heatmap container */}
+            {/* Heatmap container - responsive with aspect ratio */}
             <div
-              className="relative w-[280px] h-[280px] mx-auto bg-zinc-800 rounded overflow-hidden cursor-crosshair"
+              className="relative w-full max-w-[280px] aspect-square mx-auto bg-zinc-800 rounded overflow-hidden cursor-crosshair"
               style={{ touchAction: 'none' }}
             >
               {/* Grid cells */}
               <svg
-                width="280"
-                height="280"
-                className="absolute inset-0"
+                viewBox="0 0 280 280"
+                className="absolute inset-0 w-full h-full"
+                preserveAspectRatio="xMidYMid meet"
                 onMouseMove={handleMouseMove}
                 onMouseLeave={handleMouseLeave}
               >
@@ -462,35 +462,41 @@ export function EnergyLandscape({ optimalAction, onActionSelect }: EnergyLandsca
           </div>
 
           {/* Slice plane controls */}
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <span className="text-xs text-zinc-500">Slice Plane:</span>
-            <div className="flex gap-1">
-              {(["XY", "XZ", "YZ"] as const).map(plane => (
-                <button
-                  key={plane}
-                  onClick={() => setSlicePlane(plane)}
-                  className={`px-2 py-1 text-xs rounded transition-colors ${
-                    slicePlane === plane
-                      ? "bg-indigo-600 text-white"
-                      : "bg-zinc-700 text-zinc-400 hover:text-white"
-                  }`}
-                >
-                  {plane}
-                </button>
-              ))}
+          <div className="mt-4 space-y-3">
+            {/* First row: Slice plane selection */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-zinc-500">Slice Plane:</span>
+              <div className="flex gap-1">
+                {(["XY", "XZ", "YZ"] as const).map(plane => (
+                  <button
+                    key={plane}
+                    onClick={() => setSlicePlane(plane)}
+                    className={`px-2 py-1 text-xs rounded transition-colors ${
+                      slicePlane === plane
+                        ? "bg-indigo-600 text-white"
+                        : "bg-zinc-700 text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    {plane}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <span className="text-xs text-zinc-500 ml-2">Fix {axisLabels.fixed} at:</span>
-            <input
-              type="range"
-              min="-7.5"
-              max="7.5"
-              step="0.5"
-              value={fixedValue}
-              onChange={(e) => setFixedValue(Number(e.target.value))}
-              className="w-20 h-1.5 bg-zinc-700 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-indigo-500 [&::-webkit-slider-thumb]:rounded-full"
-            />
-            <span className="text-xs text-zinc-300 font-mono w-12">{fixedValue.toFixed(1)}</span>
+            {/* Second row: Fixed value slider */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-zinc-500">Fix {axisLabels.fixed} at:</span>
+              <input
+                type="range"
+                min="-7.5"
+                max="7.5"
+                step="0.5"
+                value={fixedValue}
+                onChange={(e) => setFixedValue(Number(e.target.value))}
+                className="flex-1 min-w-[80px] max-w-[120px] h-1.5 bg-zinc-700 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-indigo-500 [&::-webkit-slider-thumb]:rounded-full"
+              />
+              <span className="text-xs text-zinc-300 font-mono w-12">{fixedValue.toFixed(1)}</span>
+            </div>
           </div>
 
           {/* Additional controls */}

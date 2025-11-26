@@ -1,0 +1,945 @@
+"""
+V-JEPA2 model service for real inference on Apple Silicon (MPS) and CUDA.
+
+Optimized for MacBook M4 with 16GB unified memory.
+"""
+
+import logging
+import os
+import time
+import threading
+from dataclasses import dataclass
+from typing import Optional, Tuple, List, Dict, Any, Callable
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+from PIL import Image
+import numpy as np
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
+
+# Global download progress tracking
+_download_progress: Dict[str, Dict[str, Any]] = {}
+_download_progress_lock = threading.Lock()
+
+# Enable MPS fallback for unsupported operations
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
+
+@dataclass
+class DeviceInfo:
+    """Information about the compute device."""
+    device_type: str  # 'mps', 'cuda', 'cpu'
+    device_name: str
+    memory_gb: float
+    supports_fp16: bool
+    recommended_model: str
+    max_batch_size: int
+
+
+def get_device_info() -> DeviceInfo:
+    """Detect the best available device and its capabilities."""
+
+    if torch.backends.mps.is_available():
+        # Apple Silicon (M1/M2/M3/M4)
+        # Get approximate memory from system
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['sysctl', '-n', 'hw.memsize'],
+                capture_output=True, text=True
+            )
+            memory_bytes = int(result.stdout.strip())
+            memory_gb = memory_bytes / (1024 ** 3)
+        except Exception:
+            memory_gb = 16.0  # Assume 16GB if detection fails
+
+        # Determine recommended model based on memory
+        if memory_gb >= 32:
+            recommended = "vit-huge"
+            max_batch = 4
+        elif memory_gb >= 16:
+            recommended = "vit-large"
+            max_batch = 2
+        else:
+            recommended = "vit-large"
+            max_batch = 1
+
+        return DeviceInfo(
+            device_type="mps",
+            device_name=f"Apple Silicon ({memory_gb:.0f}GB unified)",
+            memory_gb=memory_gb,
+            supports_fp16=True,
+            recommended_model=recommended,
+            max_batch_size=max_batch,
+        )
+
+    elif torch.cuda.is_available():
+        # NVIDIA GPU
+        device_name = torch.cuda.get_device_name(0)
+        memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+
+        if memory_gb >= 24:
+            recommended = "vit-giant"
+            max_batch = 8
+        elif memory_gb >= 12:
+            recommended = "vit-huge"
+            max_batch = 4
+        else:
+            recommended = "vit-large"
+            max_batch = 2
+
+        return DeviceInfo(
+            device_type="cuda",
+            device_name=device_name,
+            memory_gb=memory_gb,
+            supports_fp16=True,
+            recommended_model=recommended,
+            max_batch_size=max_batch,
+        )
+
+    else:
+        # CPU fallback
+        try:
+            import psutil
+            memory_gb = psutil.virtual_memory().total / (1024 ** 3)
+        except ImportError:
+            memory_gb = 8.0
+
+        return DeviceInfo(
+            device_type="cpu",
+            device_name="CPU",
+            memory_gb=memory_gb,
+            supports_fp16=False,  # FP16 on CPU is slow
+            recommended_model="vit-large",
+            max_batch_size=1,
+        )
+
+
+def get_download_progress(model_id: str) -> Optional[Dict[str, Any]]:
+    """Get download progress for a model."""
+    with _download_progress_lock:
+        return _download_progress.get(model_id)
+
+
+def set_download_progress(model_id: str, progress: Dict[str, Any]) -> None:
+    """Set download progress for a model."""
+    with _download_progress_lock:
+        _download_progress[model_id] = progress
+
+
+def clear_download_progress(model_id: str) -> None:
+    """Clear download progress for a model."""
+    with _download_progress_lock:
+        _download_progress.pop(model_id, None)
+
+
+class ProgressTrackingTqdm(tqdm):
+    """Custom tqdm class that tracks progress to a global dict."""
+
+    _current_model_id: Optional[str] = None
+    _start_time: Optional[float] = None
+
+    @classmethod
+    def set_model_id(cls, model_id: str):
+        cls._current_model_id = model_id
+        cls._start_time = time.time()
+
+    @classmethod
+    def clear_model_id(cls):
+        cls._current_model_id = None
+        cls._start_time = None
+
+    def update(self, n=1):
+        """Override update to track progress."""
+        result = super().update(n)
+
+        if self._current_model_id and self.total:
+            elapsed = time.time() - (self._start_time or time.time())
+            set_download_progress(self._current_model_id, {
+                "downloaded": self.n,
+                "total": self.total,
+                "elapsed": elapsed,
+            })
+
+        return result
+
+
+def _patch_torch_hub_download():
+    """Patch torch.hub to use our progress-tracking tqdm."""
+    import torch.hub
+    import functools
+    import sys
+    import importlib
+
+    # Store original tqdm
+    original_tqdm = tqdm
+
+    # Store original download function
+    original_download = torch.hub.download_url_to_file
+
+    @functools.wraps(original_download)
+    def patched_download(url, dst, hash_prefix=None, progress=True):
+        # Extract model ID from URL
+        model_id = None
+        if "vitl" in url.lower():
+            model_id = "vit-large"
+        elif "vith" in url.lower():
+            model_id = "vit-huge"
+        elif "ac_vitg" in url.lower() or "ac-vitg" in url.lower():
+            model_id = "vit-giant-ac"
+        elif "vitg" in url.lower():
+            model_id = "vit-giant"
+
+        if model_id:
+            logger.info(f"Tracking download progress for {model_id}")
+            ProgressTrackingTqdm.set_model_id(model_id)
+            set_download_progress(model_id, {"downloaded": 0, "total": 1, "elapsed": 0})
+
+        try:
+            # Temporarily replace tqdm in torch.hub module
+            torch.hub.tqdm = ProgressTrackingTqdm
+            result = original_download(url, dst, hash_prefix=hash_prefix, progress=progress)
+            return result
+        finally:
+            # Restore original tqdm
+            torch.hub.tqdm = original_tqdm
+            if model_id:
+                clear_download_progress(model_id)
+                ProgressTrackingTqdm.clear_model_id()
+
+    torch.hub.download_url_to_file = patched_download
+
+
+# Apply the patch at module load time
+_patch_torch_hub_download()
+
+
+class VJEPA2ModelLoader:
+    """
+    Loads and manages V-JEPA2 models with memory optimization.
+
+    Supports:
+    - vit-large (300M params, ~2.1GB) - Best for 16GB Macs
+    - vit-huge (630M params, ~4.5GB) - Requires 24GB+
+    - vit-giant (1.2B params, ~7.2GB) - Requires 32GB+
+    - vit-giant-ac (Action-Conditioned, ~7.2GB) - For planning with actions
+    """
+
+    # Model hub names mapping
+    MODEL_HUB_NAMES = {
+        "vit-large": "vjepa2_vit_large",
+        "vit-huge": "vjepa2_vit_huge",
+        "vit-giant": "vjepa2_vit_giant",
+        "vit-giant-ac": "vjepa2_ac_vit_giant",  # Action-conditioned model
+    }
+
+    # Model sizes in GB (actual download sizes from PyTorch Hub)
+    MODEL_SIZES_GB = {
+        "vit-large": 4.8,
+        "vit-huge": 9.5,
+        "vit-giant": 15.3,
+        "vit-giant-ac": 15.5,
+    }
+
+    # Models that have action-conditioned predictors
+    AC_MODELS = {"vit-giant-ac"}
+
+    def __init__(self, cache_dir: Optional[str] = None):
+        self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "vjepa2"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self.device_info = get_device_info()
+        self.device = torch.device(self.device_info.device_type)
+
+        self._encoder: Optional[torch.nn.Module] = None
+        self._predictor: Optional[torch.nn.Module] = None
+        self._loaded_model_id: Optional[str] = None
+
+        logger.info(f"VJEPA2ModelLoader initialized on {self.device_info.device_name}")
+        logger.info(f"Recommended model: {self.device_info.recommended_model}")
+
+    def _get_torch_dtype(self) -> torch.dtype:
+        """Get the optimal dtype for the current device."""
+        if self.device_info.supports_fp16:
+            return torch.float16
+        return torch.float32
+
+    def load_model(self, model_id: str = "vit-large", force_reload: bool = False) -> torch.nn.Module:
+        """
+        Load a V-JEPA2 model.
+
+        Args:
+            model_id: One of 'vit-large', 'vit-huge', 'vit-giant'
+            force_reload: Force reload even if already loaded
+
+        Returns:
+            The encoder model ready for inference
+        """
+        if model_id not in self.MODEL_HUB_NAMES:
+            raise ValueError(f"Unknown model: {model_id}. Available: {list(self.MODEL_HUB_NAMES.keys())}")
+
+        # Check if already loaded
+        if self._encoder is not None and self._loaded_model_id == model_id and not force_reload:
+            logger.info(f"Model {model_id} already loaded")
+            return self._encoder
+
+        # Unload previous model to free memory
+        if self._encoder is not None:
+            self.unload_model()
+
+        hub_name = self.MODEL_HUB_NAMES[model_id]
+        logger.info(f"Loading {model_id} ({hub_name}) on {self.device}...")
+
+        start_time = time.time()
+
+        try:
+            # Load from PyTorch Hub - returns (encoder, predictor) tuple
+            result = torch.hub.load(
+                'facebookresearch/vjepa2',
+                hub_name,
+                pretrained=True,
+                trust_repo=True,
+            )
+
+            # V-JEPA2 returns a tuple: (encoder, predictor)
+            encoder, predictor = result
+
+            # Move to device and set dtype
+            dtype = self._get_torch_dtype()
+            encoder = encoder.to(device=self.device, dtype=dtype)
+            encoder.eval()
+
+            # Disable gradients for inference
+            for param in encoder.parameters():
+                param.requires_grad = False
+
+            elapsed = time.time() - start_time
+            total_params = sum(p.numel() for p in encoder.parameters())
+            logger.info(f"Encoder loaded in {elapsed:.1f}s ({total_params/1e6:.1f}M params)")
+
+            self._encoder = encoder
+            self._loaded_model_id = model_id
+
+            # For AC models, also load predictor to GPU for action-conditioned prediction
+            if model_id in self.AC_MODELS:
+                predictor = predictor.to(device=self.device, dtype=dtype)
+                predictor.eval()
+                for param in predictor.parameters():
+                    param.requires_grad = False
+                self._predictor = predictor
+                pred_params = sum(p.numel() for p in predictor.parameters())
+                logger.info(f"AC Predictor loaded ({pred_params/1e6:.1f}M params)")
+            else:
+                self._predictor = predictor  # Keep reference but don't load to GPU
+
+            return encoder
+
+        except Exception as e:
+            logger.error(f"Failed to load model {model_id}: {e}")
+            raise
+
+    def unload_model(self) -> None:
+        """Unload the current model to free memory."""
+        if self._encoder is not None:
+            del self._encoder
+            del self._predictor
+            self._encoder = None
+            self._predictor = None
+            self._loaded_model_id = None
+
+            # Force garbage collection
+            import gc
+            gc.collect()
+
+            if self.device_info.device_type == "cuda":
+                torch.cuda.empty_cache()
+            elif self.device_info.device_type == "mps":
+                # Sync to ensure all operations complete, then empty cache
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
+
+            logger.info("Model unloaded")
+
+    def get_model(self) -> Optional[torch.nn.Module]:
+        """Get the currently loaded encoder model."""
+        return self._encoder
+
+    def get_predictor(self) -> Optional[torch.nn.Module]:
+        """Get the currently loaded predictor model."""
+        return self._predictor
+
+    def is_loaded(self, model_id: Optional[str] = None) -> bool:
+        """Check if a model is loaded."""
+        if model_id:
+            return self._loaded_model_id == model_id
+        return self._encoder is not None
+
+    def is_ac_model(self) -> bool:
+        """Check if the loaded model is action-conditioned."""
+        return self._loaded_model_id in self.AC_MODELS
+
+    def get_model_size_gb(self, model_id: str) -> float:
+        """Get the size of a model in GB."""
+        return self.MODEL_SIZES_GB.get(model_id, 2.0)
+
+    def is_cached(self, model_id: str) -> bool:
+        """Check if a model checkpoint is already cached (downloaded)."""
+        # Check PyTorch hub cache directory
+        hub_dir = Path(torch.hub.get_dir()) / "checkpoints"
+
+        # Map model IDs to their checkpoint filenames
+        checkpoint_names = {
+            "vit-large": "vitl.pt",
+            "vit-huge": "vith.pt",
+            "vit-giant": "vitg.pt",
+            "vit-giant-ac": "vjepa2-ac-vitg.pt",  # Actual filename from PyTorch Hub
+        }
+
+        checkpoint_file = checkpoint_names.get(model_id)
+        if checkpoint_file:
+            return (hub_dir / checkpoint_file).exists()
+        return False
+
+
+class VJEPA2Inference:
+    """
+    V-JEPA2 inference service for action prediction with CEM optimization.
+
+    This handles image preprocessing, model inference, and CEM-based action planning.
+    V-JEPA2 expects video input with shape (B, C, T, H, W).
+
+    For AC models: Uses the predictor to predict future embeddings given actions.
+    For standard models: Uses embedding-based heuristic for action evaluation.
+    """
+
+    # Standard V-JEPA2 image size (256 for AC models, 224 for standard)
+    IMAGE_SIZE = 224
+    IMAGE_SIZE_AC = 256
+
+    # Normalization constants (ImageNet)
+    MEAN = [0.485, 0.456, 0.406]
+    STD = [0.229, 0.224, 0.225]
+
+    # Action space bounds (simplified 3D for demo, 7D for AC models)
+    ACTION_DIM = 3
+    ACTION_DIM_AC = 7  # DROID format: [x, y, z, roll, pitch, yaw, gripper]
+    ACTION_LOW = -7.5
+    ACTION_HIGH = 7.5
+    # AC model action bounds (DROID format)
+    ACTION_LOW_AC = -0.05  # Position
+    ACTION_HIGH_AC = 0.05
+    GRIPPER_LOW = -0.75
+    GRIPPER_HIGH = 0.75
+
+    def __init__(self, model_loader: VJEPA2ModelLoader):
+        self.loader = model_loader
+        self.device = model_loader.device
+        self.dtype = torch.float16 if model_loader.device_info.supports_fp16 else torch.float32
+
+        # Cache for preprocessed tensors and embeddings
+        # Key is (content_hash, for_ac) tuple
+        self._tensor_cache: Dict[Tuple[str, bool], torch.Tensor] = {}
+        self._embedding_cache: Dict[str, torch.Tensor] = {}
+
+    def _get_image_hash(self, image: Image.Image) -> str:
+        """Generate a hash for image content to use as cache key."""
+        import hashlib
+        # Convert image to bytes for hashing (use tobytes for consistent representation)
+        img_bytes = image.tobytes()
+        # Use first/last chunks + size for faster hashing of large images
+        if len(img_bytes) > 10000:
+            sample = img_bytes[:5000] + img_bytes[-5000:]
+        else:
+            sample = img_bytes
+        return hashlib.md5(sample + str(image.size).encode()).hexdigest()
+
+    def preprocess_image(self, image: Image.Image, use_cache: bool = True, for_ac: bool = False) -> torch.Tensor:
+        """
+        Preprocess an image for V-JEPA2 inference.
+
+        Args:
+            image: PIL Image
+            use_cache: Whether to cache the result
+            for_ac: Whether preprocessing for AC model (uses 256x256)
+
+        Returns:
+            Preprocessed tensor of shape (3, size, size)
+        """
+        # Use appropriate size for AC vs standard models
+        img_size = self.IMAGE_SIZE_AC if for_ac else self.IMAGE_SIZE
+
+        # Check cache first using content hash (not object id which can be reused)
+        cache_key = (self._get_image_hash(image), for_ac)
+        if use_cache and cache_key in self._tensor_cache:
+            return self._tensor_cache[cache_key]
+
+        # Resize and convert to RGB
+        image = image.convert("RGB")
+        image = image.resize((img_size, img_size), Image.BILINEAR)
+
+        # Convert to tensor and normalize
+        img_array = np.array(image).astype(np.float32) / 255.0
+        img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)  # HWC -> CHW
+
+        # Normalize with ImageNet stats
+        mean = torch.tensor(self.MEAN).view(3, 1, 1)
+        std = torch.tensor(self.STD).view(3, 1, 1)
+        img_tensor = (img_tensor - mean) / std
+
+        # Cache the result
+        if use_cache:
+            self._tensor_cache[cache_key] = img_tensor
+
+        return img_tensor
+
+    def clear_cache(self):
+        """Clear the tensor and embedding caches."""
+        self._tensor_cache.clear()
+        self._embedding_cache.clear()
+
+    def prepare_video_input(
+        self,
+        current_image: Image.Image,
+        goal_image: Image.Image,
+        for_ac: bool = False,
+    ) -> torch.Tensor:
+        """
+        Prepare a 2-frame video input for V-JEPA2.
+
+        Args:
+            current_image: Current state image
+            goal_image: Goal state image
+            for_ac: Whether preparing for AC model (uses 256x256)
+
+        Returns:
+            Video tensor of shape (1, 3, 2, 224, 224) or (1, 3, 2, 256, 256) if for_ac
+        """
+        current_tensor = self.preprocess_image(current_image, for_ac=for_ac)
+        goal_tensor = self.preprocess_image(goal_image, for_ac=for_ac)
+
+        # Stack as video frames: (C, H, W) + (C, H, W) -> (2, C, H, W)
+        video = torch.stack([current_tensor, goal_tensor], dim=0)
+
+        # Permute to (C, T, H, W) format: (2, C, H, W) -> (C, 2, H, W)
+        video = video.permute(1, 0, 2, 3)
+
+        # Add batch dimension: (C, T, H, W) -> (B=1, C, T, H, W)
+        video = video.unsqueeze(0)
+
+        # Move to device
+        video = video.to(device=self.device, dtype=self.dtype)
+
+        return video
+
+    @torch.inference_mode()
+    def encode_images(
+        self,
+        current_image: Image.Image,
+        goal_image: Image.Image,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Encode current and goal images to embeddings.
+
+        This is called once at the start of CEM to avoid repeated encoding.
+
+        Args:
+            current_image: Current state image
+            goal_image: Goal state image
+
+        Returns:
+            Tuple of (current_embedding, goal_embedding)
+            For standard models: each of shape (embed_dim,) - global averaged
+            For AC models: each of shape (num_patches, embed_dim) - full patch embeddings
+        """
+        encoder = self.loader.get_model()
+        if encoder is None:
+            raise RuntimeError("No model loaded. Call loader.load_model() first.")
+
+        is_ac = self.loader.is_ac_model()
+
+        # Prepare video input with both frames (use AC sizing if AC model)
+        video = self.prepare_video_input(current_image, goal_image, for_ac=is_ac)
+
+        # Get embeddings from encoder
+        embeddings = encoder(video)  # (1, num_patches, embed_dim)
+
+        if is_ac:
+            # For AC models, keep full patch embeddings for predictor
+            # Encode each frame separately for proper conditioning
+            current_tensor = self.preprocess_image(current_image, for_ac=True)
+            goal_tensor = self.preprocess_image(goal_image, for_ac=True)
+
+            # Create single-frame "videos" with temporal repetition
+            # AC model expects (B, C, T, H, W) format
+            current_video = current_tensor.unsqueeze(0).unsqueeze(2).repeat(1, 1, 2, 1, 1)
+            goal_video = goal_tensor.unsqueeze(0).unsqueeze(2).repeat(1, 1, 2, 1, 1)
+
+            current_video = current_video.to(device=self.device, dtype=self.dtype)
+            goal_video = goal_video.to(device=self.device, dtype=self.dtype)
+
+            # Encode separately
+            current_emb = encoder(current_video)  # (1, num_patches, embed_dim)
+            goal_emb = encoder(goal_video)
+
+            # Store full embeddings for predictor use
+            self._embedding_cache["current_patches"] = current_emb
+            self._embedding_cache["goal_patches"] = goal_emb
+
+            # Return averaged for compatibility (also used in heuristic fallback)
+            return current_emb.mean(dim=1).squeeze(0), goal_emb.mean(dim=1).squeeze(0)
+        else:
+            # For standard models, use averaged global embedding
+            global_emb = embeddings.mean(dim=1)  # (1, embed_dim)
+
+            # Split into "current" and "goal" representations
+            embed_dim = global_emb.shape[1]
+            half_dim = embed_dim // 2
+
+            current_emb = global_emb[0, :half_dim]
+            goal_emb = global_emb[0, half_dim:]
+
+            return current_emb, goal_emb
+
+    @torch.inference_mode()
+    def evaluate_actions_ac(
+        self,
+        actions: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Evaluate actions using the AC predictor (for AC models only).
+
+        Uses the predictor to predict future embeddings given actions,
+        then computes L1 distance to goal embeddings.
+
+        Args:
+            actions: Action candidates of shape (num_samples, 7) in DROID format
+
+        Returns:
+            Energy values for each action, shape (num_samples,)
+        """
+        predictor = self.loader.get_predictor()
+        if predictor is None:
+            raise RuntimeError("No AC predictor loaded")
+
+        current_patches = self._embedding_cache.get("current_patches")
+        goal_patches = self._embedding_cache.get("goal_patches")
+
+        if current_patches is None or goal_patches is None:
+            raise RuntimeError("Embeddings not cached. Call encode_images first.")
+
+        num_samples = actions.shape[0]
+
+        # Convert actions to tensor
+        actions_t = torch.from_numpy(actions).float().to(self.device)
+
+        # Expand current patches to batch size
+        # current_patches shape: (1, num_patches, embed_dim)
+        x = current_patches.expand(num_samples, -1, -1)  # (num_samples, num_patches, embed_dim)
+
+        # For AC predictor, actions shape should be (B, 7)
+        # States (end-effector state) - use zeros as default
+        states = torch.zeros(num_samples, self.ACTION_DIM_AC, device=self.device, dtype=self.dtype)
+
+        # Run predictor to get predicted future embeddings
+        # predictor(x, actions, states) -> predicted embeddings
+        predicted = predictor(x, actions_t.to(self.dtype), states)  # (num_samples, num_patches, embed_dim)
+
+        # Compute L1 distance between predicted and goal embeddings
+        # Average over patches and embedding dimensions
+        goal_expanded = goal_patches.expand(num_samples, -1, -1)  # (num_samples, num_patches, embed_dim)
+        energy = torch.abs(predicted - goal_expanded).mean(dim=(1, 2))  # (num_samples,)
+
+        # Scale to reasonable range (typical L1 values are small)
+        energy = energy * 10.0
+
+        return energy.cpu().numpy()
+
+    @torch.inference_mode()
+    def evaluate_actions(
+        self,
+        current_emb: torch.Tensor,
+        goal_emb: torch.Tensor,
+        actions: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Evaluate a batch of action candidates using embedding-based energy.
+
+        The energy function measures how well an action would move from
+        current state toward the goal state in the learned embedding space.
+
+        Energy is normalized to a reasonable range (typically 0-10) where:
+        - Lower energy = better action
+        - 0 = perfect alignment with goal direction
+        - Higher values = poor alignment or excessive action magnitude
+
+        Args:
+            current_emb: Current state embedding (embed_dim,)
+            goal_emb: Goal state embedding (embed_dim,)
+            actions: Action candidates of shape (num_samples, action_dim)
+
+        Returns:
+            Energy values for each action, shape (num_samples,)
+        """
+        num_samples = actions.shape[0]
+
+        # Convert actions to tensor
+        actions_t = torch.from_numpy(actions).float().to(self.device)
+
+        # Compute direction vector from current to goal in embedding space
+        direction = goal_emb - current_emb  # (half_embed_dim,)
+        direction_norm = torch.norm(direction)
+
+        # Normalize direction to unit vector
+        if direction_norm > 1e-6:
+            direction_unit = direction / direction_norm
+        else:
+            # If embeddings are nearly identical, any action is equally good
+            direction_unit = direction
+
+        # Normalize actions to [-1, 1] range
+        actions_normalized = actions_t / self.ACTION_HIGH  # (num_samples, 3)
+
+        # Compute action magnitudes (normalized, so max ~1.73 for corner actions)
+        action_norms = torch.norm(actions_normalized, dim=1)  # (num_samples,)
+
+        # Use first 3 dimensions of direction as the target action direction
+        # This maps the high-dimensional embedding difference to our 3D action space
+        proj_dim = min(self.ACTION_DIM, direction_unit.shape[0])
+        goal_direction_3d = direction_unit[:proj_dim]  # (3,)
+
+        # Normalize the 3D goal direction
+        goal_3d_norm = torch.norm(goal_direction_3d)
+        if goal_3d_norm > 1e-6:
+            goal_direction_3d = goal_direction_3d / goal_3d_norm
+
+        # Compute cosine similarity between actions and goal direction
+        # Range: [-1, 1] where 1 = perfect alignment, -1 = opposite direction
+        action_norms_safe = torch.clamp(action_norms, min=1e-6)
+        cosine_sim = torch.sum(actions_normalized * goal_direction_3d.unsqueeze(0), dim=1) / action_norms_safe
+
+        # Energy components (all normalized to reasonable ranges):
+        # 1. Alignment term: (1 - cosine_sim) / 2 maps [-1, 1] to [1, 0]
+        #    Perfect alignment = 0, opposite = 1
+        alignment_energy = (1.0 - cosine_sim) / 2.0  # Range: [0, 1]
+
+        # 2. Magnitude term: prefer moderate actions, penalize extremes
+        #    Optimal magnitude around 0.5-0.7 of max
+        optimal_magnitude = 0.6
+        magnitude_penalty = (action_norms - optimal_magnitude).abs()  # Range: [0, ~1.1]
+
+        # 3. Small exploration noise for diversity
+        noise = 0.02 * torch.randn(num_samples, device=self.device)
+
+        # Combine into final energy (scale to nice range of ~0-10)
+        # Weight alignment more heavily than magnitude
+        energy = (
+            5.0 * alignment_energy +      # 0-5 based on alignment
+            2.0 * magnitude_penalty +      # 0-2.2 based on magnitude
+            noise                          # Small noise
+        )
+
+        return energy.cpu().numpy()
+
+    @torch.inference_mode()
+    def run_cem(
+        self,
+        current_image: Image.Image,
+        goal_image: Image.Image,
+        num_samples: int = 100,
+        num_iterations: int = 10,
+        elite_fraction: float = 0.1,
+        progress_callback: Optional[Callable[[int, int, float, np.ndarray], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run Cross-Entropy Method optimization to find the best action.
+
+        For AC models: Uses predictor to predict future states and L1 distance to goal.
+        For standard models: Uses embedding-based heuristic.
+
+        Args:
+            current_image: Current state image
+            goal_image: Goal state image
+            num_samples: Number of action samples per iteration
+            num_iterations: Number of CEM iterations
+            elite_fraction: Fraction of top samples to use for updating distribution
+            progress_callback: Optional callback(iteration, total, best_energy, best_action)
+
+        Returns:
+            Dictionary with optimal action, confidence, energy history, etc.
+        """
+        start_time = time.time()
+
+        try:
+            # Check if we have an AC model
+            is_ac = self.loader.is_ac_model()
+
+            # Encode images once (cached)
+            current_emb, goal_emb = self.encode_images(current_image, goal_image)
+
+            # Set action dimensions and bounds based on model type
+            if is_ac:
+                action_dim = self.ACTION_DIM_AC
+                # DROID action space: positions bounded by ACTION_LOW/HIGH_AC, gripper by GRIPPER bounds
+                action_low = np.array([self.ACTION_LOW_AC] * 6 + [self.GRIPPER_LOW])
+                action_high = np.array([self.ACTION_HIGH_AC] * 6 + [self.GRIPPER_HIGH])
+                action_range = action_high - action_low
+            else:
+                action_dim = self.ACTION_DIM
+                action_low = np.full(action_dim, self.ACTION_LOW)
+                action_high = np.full(action_dim, self.ACTION_HIGH)
+                action_range = action_high - action_low
+
+            # Initialize action distribution (mean and std)
+            action_mean = np.zeros(action_dim)
+            action_std = action_range / 4
+
+            num_elite = max(1, int(num_samples * elite_fraction))
+
+            energy_history = []
+            best_action = None
+            best_energy = float('inf')
+
+            for iteration in range(num_iterations):
+                # Sample actions from current distribution
+                actions = np.random.normal(
+                    loc=action_mean,
+                    scale=action_std,
+                    size=(num_samples, action_dim)
+                )
+
+                # Clip to action bounds
+                actions = np.clip(actions, action_low, action_high)
+
+                # Evaluate all actions using appropriate method
+                if is_ac:
+                    energies = self.evaluate_actions_ac(actions)
+                else:
+                    energies = self.evaluate_actions(current_emb, goal_emb, actions)
+
+                # Select elite samples (lowest energy)
+                elite_indices = np.argsort(energies)[:num_elite]
+                elite_actions = actions[elite_indices]
+                elite_energies = energies[elite_indices]
+
+                # Update distribution based on elite samples
+                action_mean = elite_actions.mean(axis=0)
+                action_std = elite_actions.std(axis=0) + 1e-6  # Prevent zero std
+
+                # Track best
+                if elite_energies[0] < best_energy:
+                    best_energy = elite_energies[0]
+                    best_action = elite_actions[0].copy()
+
+                energy_history.append(round(float(best_energy), 3))
+
+                # Progress callback
+                if progress_callback:
+                    progress_callback(iteration + 1, num_iterations, best_energy, best_action)
+
+            elapsed = time.time() - start_time
+
+            # Compute confidence based on:
+            # 1. Final energy value (lower = better, range 0-10)
+            # 2. Convergence (energy reduction over iterations)
+            # 3. Action distribution stability (low std = confident)
+            final_std = action_std.mean()
+            initial_energy = energy_history[0] if energy_history else best_energy
+            energy_reduction = max(0, initial_energy - best_energy)
+
+            # Energy-based confidence: energy 0 = 1.0, energy 5 = 0.5, energy 10+ = 0.0
+            energy_confidence = max(0, 1.0 - best_energy / 10.0)
+
+            # Convergence bonus: reward significant energy reduction
+            convergence_bonus = min(0.2, energy_reduction / 5.0)
+
+            # Stability penalty: high std means uncertain
+            stability_penalty = min(0.2, final_std * 0.1)
+
+            confidence = min(0.98, max(0.1,
+                0.5 * energy_confidence + 0.3 + convergence_bonus - stability_penalty
+            ))
+
+            return {
+                "action": [round(float(x), 4) for x in best_action],
+                "confidence": round(confidence, 3),
+                "energy": round(float(best_energy), 3),
+                "energy_history": energy_history,
+                "final_std": [round(float(x), 4) for x in action_std],
+                "inference_time_ms": round(elapsed * 1000, 1),
+                "samples_evaluated": num_samples * num_iterations,
+                "model": self.loader._loaded_model_id,
+                "device": self.loader.device_info.device_type,
+                "is_ac_model": is_ac,
+            }
+        finally:
+            # Always clear per-request caches to prevent memory buildup
+            self.clear_cache()
+
+    @torch.inference_mode()
+    def predict_action(
+        self,
+        current_image: Image.Image,
+        goal_image: Image.Image,
+    ) -> Dict[str, Any]:
+        """
+        Predict an action given current and goal images.
+
+        This is a simple single-shot prediction for backwards compatibility.
+        For better results, use run_cem() instead.
+
+        Args:
+            current_image: Current state image
+            goal_image: Goal state image
+
+        Returns:
+            Dictionary with action, confidence, and metadata
+        """
+        # Use CEM with minimal iterations for single prediction
+        return self.run_cem(
+            current_image,
+            goal_image,
+            num_samples=50,
+            num_iterations=3,
+            elite_fraction=0.2,
+        )
+
+
+# Global instances
+_model_loader: Optional[VJEPA2ModelLoader] = None
+_inference: Optional[VJEPA2Inference] = None
+
+
+def get_model_loader() -> VJEPA2ModelLoader:
+    """Get or create the global model loader."""
+    global _model_loader
+    if _model_loader is None:
+        _model_loader = VJEPA2ModelLoader()
+    return _model_loader
+
+
+def get_inference() -> VJEPA2Inference:
+    """Get or create the global inference service."""
+    global _inference
+    if _inference is None:
+        _inference = VJEPA2Inference(get_model_loader())
+    return _inference
+
+
+def get_system_info() -> Dict[str, Any]:
+    """Get system and device information."""
+    loader = get_model_loader()
+    info = loader.device_info
+
+    return {
+        "device_type": info.device_type,
+        "device_name": info.device_name,
+        "memory_gb": round(info.memory_gb, 1),
+        "supports_fp16": info.supports_fp16,
+        "recommended_model": info.recommended_model,
+        "max_batch_size": info.max_batch_size,
+        "model_loaded": loader.is_loaded(),
+        "loaded_model": loader._loaded_model_id,
+    }

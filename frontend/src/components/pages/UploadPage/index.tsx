@@ -48,6 +48,9 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
   const { preset, samples, iterations, currentImage, goalImage, hasResults, isProcessing, progress, result, error } = planningState;
   const { showToast } = useToast();
 
+  // Track selected action from energy landscape
+  const [selectedAction, setSelectedAction] = useState<{ action: [number, number, number]; energy: number } | null>(null);
+
   // Model management from useModels hook
   const { models, loadedModel, isLoading: isLoadingModels } = useModels();
   const loadedModelInfo = models.find(m => m.id === loadedModel);
@@ -558,7 +561,7 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               </div>
               <div className="flex justify-between text-xs text-zinc-600 mt-2">
                 <span>Iter 1</span>
-                <span>Iter {iterations}</span>
+                <span>Iter {convergenceData.length}</span>
               </div>
             </div>
 
@@ -875,7 +878,7 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               <EnergyLandscape
                 optimalAction={(result?.action ?? [0, 0, 0]) as [number, number, number]}
                 onActionSelect={(action, energy) => {
-                  console.log("Selected action:", action, "Energy:", energy);
+                  setSelectedAction({ action, energy });
                 }}
               />
             </div>

@@ -30,7 +30,8 @@ interface HistoryContextType {
 const HistoryContext = createContext<HistoryContextType | null>(null);
 
 const STORAGE_KEY = "vjepa2-planning-history";
-const MAX_HISTORY_SIZE = 100; // Limit history to prevent excessive storage
+const MAX_HISTORY_SIZE = 20; // Limit to 20 experiments - base64 images are ~100KB each, 2 per experiment = ~4MB at 20 experiments
+const MAX_STORAGE_SIZE_MB = 4; // localStorage limit is typically 5MB, leave headroom
 
 export function HistoryProvider({ children }: { children: ReactNode }) {
   const [experiments, setExperiments] = useState<ExperimentHistory[]>([]);
@@ -50,10 +51,34 @@ export function HistoryProvider({ children }: { children: ReactNode }) {
 
   // Save to localStorage whenever experiments change
   useEffect(() => {
+    if (experiments.length === 0) {
+      // Don't save empty array (preserve any existing data if we just loaded)
+      return;
+    }
+
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(experiments));
+      const data = JSON.stringify(experiments);
+      localStorage.setItem(STORAGE_KEY, data);
     } catch (error) {
-      console.error("Failed to save history to localStorage:", error);
+      // Handle QuotaExceededError by removing oldest non-favorite experiments
+      if (error instanceof DOMException && error.name === "QuotaExceededError") {
+        console.warn("localStorage quota exceeded, removing oldest experiments...");
+        // Remove oldest non-favorite experiments until it fits
+        const toSave = experiments.filter((exp) => exp.favorite);
+        const nonFavorites = experiments.filter((exp) => !exp.favorite);
+        // Keep only the 5 most recent non-favorites
+        const kept = [...toSave, ...nonFavorites.slice(0, 5)];
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(kept));
+          console.log(`Reduced history from ${experiments.length} to ${kept.length} experiments`);
+        } catch {
+          // If still too big, clear history entirely
+          console.error("Still too large, clearing history");
+          localStorage.removeItem(STORAGE_KEY);
+        }
+      } else {
+        console.error("Failed to save history to localStorage:", error);
+      }
     }
   }, [experiments]);
 

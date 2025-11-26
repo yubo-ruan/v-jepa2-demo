@@ -6,6 +6,24 @@ import { planningPresets, defaultPlanningState } from "@/constants/sampleData";
 import { api, type PlanningProgress, type ActionResult } from "@/lib/api";
 import { useHistory } from "./HistoryContext";
 
+// Helper to fetch with timeout (prevents hanging on stale blob URLs)
+async function fetchWithTimeout(url: string, timeoutMs: number = 5000): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Fetch timed out after ${timeoutMs}ms - the image may no longer be available`);
+    }
+    throw error;
+  }
+}
+
 // Extended planning state with backend data
 interface ExtendedPlanningState extends PlanningState {
   taskId: string | null;
@@ -59,7 +77,8 @@ async function convertToDataURL(imageRef: string, uploadId: string | null): Prom
   if (imageRef.startsWith("blob:")) {
     console.log('[convertToDataURL] Converting blob URL to data URL');
     try {
-      const response = await fetch(imageRef);
+      // Use timeout to prevent hanging on stale blob URLs
+      const response = await fetchWithTimeout(imageRef, 5000);
       if (!response.ok) {
         throw new Error(`Failed to fetch blob: ${response.statusText}`);
       }
@@ -207,7 +226,8 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const startPlanning = useCallback(async (model: string) => {
-    const { currentImage, goalImage, samples, iterations, currentImageUploadId, goalImageUploadId, previousCurrentImage, previousGoalImage } = planningState;
+    // Use ref to get the latest state (avoid stale closure)
+    const { currentImage, goalImage, samples, iterations, currentImageUploadId, goalImageUploadId, previousCurrentImage, previousGoalImage } = planningStateRef.current;
 
     if (!currentImage || !goalImage) {
       return;
@@ -260,13 +280,22 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
           imageChanged: currentImageChanged
         });
         try {
-          const response = await fetch(currentImage);
+          // Use timeout to prevent hanging on stale blob URLs
+          console.log('[PlanningContext] Fetching blob URL...');
+          const fetchStart = performance.now();
+          const response = await fetchWithTimeout(currentImage, 5000);
+          console.log(`[PlanningContext] Blob fetch took ${(performance.now() - fetchStart).toFixed(0)}ms`);
           if (!response.ok) {
             throw new Error(`Failed to fetch blob: ${response.statusText}`);
           }
+          const blobStart = performance.now();
           const blob = await response.blob();
+          console.log(`[PlanningContext] response.blob() took ${(performance.now() - blobStart).toFixed(0)}ms, size: ${blob.size}`);
           const file = new File([blob], "current.jpg", { type: blob.type || "image/jpeg" });
+          console.log('[PlanningContext] Uploading to backend...');
+          const uploadStart = performance.now();
           const uploadResult = await api.uploadImage(file);
+          console.log(`[PlanningContext] Backend upload took ${(performance.now() - uploadStart).toFixed(0)}ms`);
           currentUploadId = uploadResult.uploadId;
           console.log('[PlanningContext] Current image uploaded:', currentUploadId);
           setPlanningState((prev) => ({ ...prev, currentImageUploadId: currentUploadId }));
@@ -287,13 +316,22 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
           imageChanged: goalImageChanged
         });
         try {
-          const response = await fetch(goalImage);
+          // Use timeout to prevent hanging on stale blob URLs
+          console.log('[PlanningContext] Fetching goal blob URL...');
+          const fetchStart = performance.now();
+          const response = await fetchWithTimeout(goalImage, 5000);
+          console.log(`[PlanningContext] Goal blob fetch took ${(performance.now() - fetchStart).toFixed(0)}ms`);
           if (!response.ok) {
             throw new Error(`Failed to fetch blob: ${response.statusText}`);
           }
+          const blobStart = performance.now();
           const blob = await response.blob();
+          console.log(`[PlanningContext] Goal response.blob() took ${(performance.now() - blobStart).toFixed(0)}ms, size: ${blob.size}`);
           const file = new File([blob], "goal.jpg", { type: blob.type || "image/jpeg" });
+          console.log('[PlanningContext] Uploading goal to backend...');
+          const uploadStart = performance.now();
           const uploadResult = await api.uploadImage(file);
+          console.log(`[PlanningContext] Goal backend upload took ${(performance.now() - uploadStart).toFixed(0)}ms`);
           goalUploadId = uploadResult.uploadId;
           console.log('[PlanningContext] Goal image uploaded:', goalUploadId);
           setPlanningState((prev) => ({ ...prev, goalImageUploadId: goalUploadId }));
@@ -317,13 +355,40 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       console.log('[PlanningContext] Starting planning with refs:', { currentImageRef, goalImageRef, model });
 
       // Start planning task on backend
-      const { taskId } = await api.startPlanning({
-        currentImage: currentImageRef,
-        goalImage: goalImageRef,
-        model,
-        samples,
-        iterations,
-      });
+      console.log('[PlanningContext] Calling api.startPlanning...');
+      let taskId;
+      try {
+        const response = await api.startPlanning({
+          currentImage: currentImageRef,
+          goalImage: goalImageRef,
+          model,
+          samples,
+          iterations,
+        });
+        taskId = response.taskId;
+        console.log('[PlanningContext] api.startPlanning returned taskId:', taskId);
+      } catch (apiError) {
+        console.error('[PlanningContext] api.startPlanning failed:', apiError);
+
+        // Check if error is related to stale upload IDs
+        const errorMsg = apiError instanceof Error ? apiError.message : String(apiError);
+        const isUploadError = errorMsg.toLowerCase().includes('upload not found') ||
+                              errorMsg.toLowerCase().includes('re-upload');
+
+        if (isUploadError) {
+          console.log('[PlanningContext] Stale upload ID detected, clearing cache and retrying...');
+          // Clear cached upload IDs
+          setPlanningState((prev) => ({
+            ...prev,
+            currentImageUploadId: null,
+            goalImageUploadId: null,
+            previousCurrentImage: null,
+            previousGoalImage: null,
+          }));
+          throw new Error("Images need to be re-uploaded. Please try again.");
+        }
+        throw apiError;
+      }
 
       // Update task ID and track current images for next run
       setPlanningState((prev) => ({
@@ -390,11 +455,33 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
         },
         onError: (error) => {
           console.error('[PlanningContext] onError callback triggered:', error);
-          setPlanningState((prev) => ({
-            ...prev,
-            isProcessing: false,
-            error,
-          }));
+
+          // Check if error is related to image loading (stale upload IDs)
+          // Must be specific to avoid false positives (e.g., "Embeddings not cached" contains "image" in "images")
+          const lowerError = error.toLowerCase();
+          const isImageError = lowerError.includes('could not load images') ||
+                               lowerError.includes('upload not found') ||
+                               lowerError.includes('re-upload');
+
+          if (isImageError) {
+            console.log('[PlanningContext] Image loading error detected, clearing cached upload IDs');
+            // Clear cached upload IDs so they're re-uploaded next time
+            setPlanningState((prev) => ({
+              ...prev,
+              isProcessing: false,
+              error: "Images need to be re-uploaded. This can happen if the backend was restarted. Please try again.",
+              currentImageUploadId: null,
+              goalImageUploadId: null,
+              previousCurrentImage: null,
+              previousGoalImage: null,
+            }));
+          } else {
+            setPlanningState((prev) => ({
+              ...prev,
+              isProcessing: false,
+              error,
+            }));
+          }
           wsRef.current = null;
         },
         onCancelled: () => {
@@ -415,7 +502,7 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
         error: error instanceof Error ? error.message : "Failed to start planning",
       }));
     }
-  }, [planningState, addExperiment]);
+  }, [addExperiment]);
 
   const cancelPlanning = useCallback(async () => {
     const { taskId } = planningState;

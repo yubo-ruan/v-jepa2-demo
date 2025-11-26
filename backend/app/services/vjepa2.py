@@ -32,6 +32,12 @@ _download_progress_lock = threading.Lock()
 # Enable MPS fallback for unsupported operations
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
+# CRITICAL: Configure MPS memory allocator to prevent memory fragmentation
+# This is essential for stable multi-step planning without slowdown
+# Set to 'low_watermark_ratio' to release memory more aggressively
+os.environ['PYTORCH_MPS_HIGH_WATERMARK_RATIO'] = '0.0'  # Disable high watermark (release immediately)
+os.environ['PYTORCH_MPS_LOW_WATERMARK_RATIO'] = '0.0'   # Don't keep any memory pool reserve
+
 
 @dataclass
 class DeviceInfo:
@@ -775,15 +781,11 @@ class VJEPA2Inference:
 
         # Cache for preprocessed tensors and embeddings with LRU eviction
         # Key is (content_hash, for_ac) tuple
-        # Scale cache size based on available RAM (10% of total RAM for cache)
-        # For 16GB M4: ~400 images (~1.6GB cache) vs previous 50 images (~20MB)
-        import psutil
-        total_memory_gb = psutil.virtual_memory().total / (1024 ** 3)
-        # Each FP32 tensor (3, 256, 256) ≈ 768KB, allocate 10% of RAM for cache
-        tensor_size_mb = 0.75  # ~768KB per tensor
-        cache_memory_gb = total_memory_gb * 0.10  # 10% of RAM
-        self._max_tensor_cache_size = max(50, int((cache_memory_gb * 1024) / tensor_size_mb))
-        logger.info(f"Tensor cache sized for {total_memory_gb:.1f}GB RAM: {self._max_tensor_cache_size} images (~{cache_memory_gb:.2f}GB)")
+        # IMPORTANT: Keep cache small to prevent MPS memory fragmentation
+        # Large caches cause exponentially increasing encoding times on subsequent runs
+        # For multi-step planning, we need fast cleanup between runs, not large caches
+        self._max_tensor_cache_size = 10  # Small cache - just for immediate reuse within a run
+        logger.info(f"Tensor cache size: {self._max_tensor_cache_size} images (optimized for multi-step planning)")
 
         self._tensor_cache: Dict[Tuple[str, bool], torch.Tensor] = {}
         self._tensor_cache_order: List[Tuple[str, bool]] = []  # For LRU tracking
@@ -861,8 +863,15 @@ class VJEPA2Inference:
 
         return img_tensor
 
-    def clear_cache(self):
-        """Clear the tensor and embedding caches to free memory."""
+    def clear_cache(self, aggressive: bool = False):
+        """
+        Clear the tensor and embedding caches to free memory.
+
+        Args:
+            aggressive: If True, perform more thorough cleanup for MPS memory fragmentation.
+                       Should be set to True between planning runs to prevent slowdown.
+        """
+        # Clear all cached tensors
         self._tensor_cache.clear()
         self._tensor_cache_order.clear()
         self._embedding_cache.clear()
@@ -871,8 +880,30 @@ class VJEPA2Inference:
         # Force garbage collection and empty MPS cache on M4
         import gc
         gc.collect()
+
         if self.device.type == "mps":
+            # Synchronize to ensure all MPS operations complete
+            torch.mps.synchronize()
             torch.mps.empty_cache()
+
+            if aggressive:
+                # For MPS, run multiple GC cycles to help with memory fragmentation
+                # This is critical for preventing the "encoding slowdown" issue
+                # where subsequent planning runs take exponentially longer
+                for _ in range(3):
+                    gc.collect()
+                torch.mps.synchronize()
+                torch.mps.empty_cache()
+
+                # Also recommend a full MPS heap reset for truly fresh state
+                # This forces the MPS allocator to release ALL memory back to the system
+                try:
+                    torch.mps.set_per_process_memory_fraction(0.0)  # Reset allocation
+                    torch.mps.set_per_process_memory_fraction(1.0)  # Allow full memory again
+                except Exception:
+                    pass  # These APIs may not be available in all PyTorch versions
+
+                logger.debug("Aggressive MPS memory cleanup completed")
 
     def prepare_video_input(
         self,
@@ -928,6 +959,8 @@ class VJEPA2Inference:
             For standard models: each of shape (embed_dim,) - global averaged
             For AC models: each of shape (num_patches, embed_dim) - full patch embeddings
         """
+        encode_start = time.time()
+
         encoder = self.loader.get_model()
         if encoder is None:
             raise RuntimeError("No model loaded. Call loader.load_model() first.")
@@ -961,6 +994,10 @@ class VJEPA2Inference:
             self._embedding_cache["current_patches"] = current_emb
             self._embedding_cache["goal_patches"] = goal_emb
 
+            # Log encoding time for performance monitoring
+            encode_elapsed = time.time() - encode_start
+            logger.info(f"Image encoding completed in {encode_elapsed:.2f}s (AC model)")
+
             # Return averaged for compatibility (also used in heuristic fallback)
             return current_emb.mean(dim=1).squeeze(0), goal_emb.mean(dim=1).squeeze(0)
         else:
@@ -978,6 +1015,10 @@ class VJEPA2Inference:
 
             current_emb = global_emb[0, :half_dim]
             goal_emb = global_emb[0, half_dim:]
+
+            # Log encoding time for performance monitoring
+            encode_elapsed = time.time() - encode_start
+            logger.info(f"Image encoding completed in {encode_elapsed:.2f}s (standard model)")
 
             return current_emb, goal_emb
 
@@ -1192,6 +1233,10 @@ class VJEPA2Inference:
         """
         start_time = time.time()
 
+        # CRITICAL: Clear any leftover memory from previous runs BEFORE starting
+        # This prevents MPS memory fragmentation that causes exponentially slower encoding
+        self.clear_cache(aggressive=True)
+
         try:
             # Check if we have an AC model
             is_ac = self.loader.is_ac_model()
@@ -1347,7 +1392,9 @@ class VJEPA2Inference:
             }
         finally:
             # Always clear per-request caches to prevent memory buildup
-            self.clear_cache()
+            # Use aggressive=True to prevent MPS memory fragmentation that causes
+            # exponentially increasing encoding times on subsequent runs
+            self.clear_cache(aggressive=True)
 
     @torch.inference_mode()
     def predict_action(

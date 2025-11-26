@@ -178,7 +178,10 @@ class PlannerService:
         model_id = task.request.model
 
         # Capture the event loop for async callbacks
-        main_loop = asyncio.get_event_loop()
+        # IMPORTANT: Use get_running_loop() instead of get_event_loop()
+        # get_event_loop() is deprecated and can return a different (non-running) loop
+        # after the first task completes, causing subsequent tasks to hang
+        main_loop = asyncio.get_running_loop()
 
         # Check if model needs to be loaded and send status
         from app.services.vjepa2 import get_model_loader
@@ -448,8 +451,12 @@ class PlannerService:
             logger.error(error_msg, exc_info=True)
             raise RuntimeError(error_msg) from e
 
-        # Clear tensor cache after planning
-        inference.clear_cache()
+        # Clear tensor cache after planning (aggressive mode for multi-step planning)
+        inference.clear_cache(aggressive=True)
+
+        # Explicitly delete PIL Image objects to free memory
+        del current_img
+        del goal_img
 
         # Create final result
         result = ActionResult(

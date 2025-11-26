@@ -121,3 +121,16 @@ async def get_upload(upload_id: str):
         content=upload["content"],
         media_type=upload["content_type"],
     )
+
+
+@router.head("/{upload_id}")
+async def check_upload_exists(upload_id: str):
+    """Check if an upload exists (HEAD request for validation)."""
+    if upload_id not in _uploads:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    return Response(status_code=200)
+
+
+def upload_exists(upload_id: str) -> bool:
+    """Check if an upload ID exists in the store."""
+    return upload_id in _uploads

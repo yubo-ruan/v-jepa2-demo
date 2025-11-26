@@ -15,6 +15,7 @@ from app.models.schemas import (
 from app.services.planner import planner
 from app.services.vjepa2 import get_inference
 from app.api.websocket import ws_manager
+from app.api.routes.upload import upload_exists
 from app.config import settings
 
 router = APIRouter(prefix="/plan", tags=["planning"])
@@ -62,24 +63,54 @@ async def create_planning_task(request: PlanningRequest):
     import logging
     logger = logging.getLogger(__name__)
 
+    # Validate upload IDs before starting planning
+    # This prevents race conditions where WebSocket error is sent before client connects
+    current_image = request.current_image
+    goal_image = request.goal_image
+
+    # Check if images are upload IDs (UUIDs) and validate they exist
+    def is_upload_id(ref: str) -> bool:
+        """Check if reference looks like an upload ID (UUID format)."""
+        import re
+        return bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', ref, re.I))
+
+    if is_upload_id(current_image) and not upload_exists(current_image):
+        logger.warning(f"Current image upload ID not found: {current_image}")
+        raise HTTPException(
+            status_code=400,
+            detail="Current image upload not found. Please re-upload the image."
+        )
+
+    if is_upload_id(goal_image) and not upload_exists(goal_image):
+        logger.warning(f"Goal image upload ID not found: {goal_image}")
+        raise HTTPException(
+            status_code=400,
+            detail="Goal image upload not found. Please re-upload the image."
+        )
+
     # Cancel any lingering background tasks to prevent memory leaks and stuck progress
+    # IMPORTANT: Don't await the old tasks - they may be blocked on GPU computation
+    # which can take a long time. Just signal cancellation and move on.
     if _background_tasks:
         logger.info(f"Cancelling {len(_background_tasks)} lingering background task(s)")
         for old_task_id, old_task in list(_background_tasks.items()):
             if not old_task.done():
                 old_task.cancel()
-                try:
-                    await old_task
-                except asyncio.CancelledError:
-                    pass
-            del _background_tasks[old_task_id]
-        logger.info("All lingering background tasks cancelled")
+                # Don't await here - the task runs CEM in a thread pool which may take
+                # seconds to complete. The cancel() signal will be picked up on the next
+                # iteration of CEM when it checks task.cancelled.
+                logger.info(f"Sent cancellation to task {old_task_id}")
+            # Use pop() instead of del to avoid KeyError if task was already removed
+            _background_tasks.pop(old_task_id, None)
+        logger.info("Cancellation signals sent to all lingering tasks")
 
     task_id = planner.create_task(request)
+    logger.info(f"[Planning] Created task {task_id}, creating background task...")
 
     # Start background task
     bg_task = asyncio.create_task(_run_planning_with_ws(task_id))
     _background_tasks[task_id] = bg_task
+    logger.info(f"[Planning] Background task created for {task_id}, returning response")
 
     return PlanningTaskResponse(
         task_id=task_id,
@@ -157,6 +188,14 @@ async def evaluate_actions(request: EvaluateActionsRequest):
             goal_image=goal_img,
             actions=request.actions
         )
+
+        # CRITICAL: Clear cache after evaluation to prevent memory buildup
+        # This is essential for stable multi-step planning
+        inference.clear_cache(aggressive=True)
+
+        # Explicitly delete PIL Image objects
+        del current_img
+        del goal_img
 
         return EvaluateActionsResponse(**result)
 

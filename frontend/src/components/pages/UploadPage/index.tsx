@@ -117,8 +117,12 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
 
   // Wrapper to pass loaded model to planning
   const handleStartPlanning = useCallback(() => {
+    console.log('[UploadPage] handleStartPlanning called, loadedModel:', loadedModel);
     if (loadedModel) {
+      console.log('[UploadPage] Calling startPlanning with model:', loadedModel);
       startPlanning(loadedModel);
+    } else {
+      console.log('[UploadPage] No loaded model, skipping startPlanning');
     }
   }, [loadedModel, startPlanning]);
 
@@ -945,7 +949,9 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               </div>
             </div>
 
-            {/* Energy Landscape Visualization */}
+            {/* Energy Landscape Visualization - TEMPORARILY DISABLED for multi-step planning performance */}
+            {/* TODO: Re-enable once memory management is optimized */}
+            {/*
             <div className="w-full lg:w-[340px] shrink-0">
               <EnergyLandscape
                 optimalAction={(result?.action ?? [0, 0, 0]) as [number, number, number]}
@@ -957,7 +963,6 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
                 }}
               />
 
-              {/* Selected Action Display */}
               {selectedAction && (
                 <div className="mt-3 p-3 bg-zinc-800 rounded-lg border border-zinc-700">
                   <p className="text-xs text-zinc-400 mb-2 font-medium">Selected Point</p>
@@ -988,6 +993,7 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
                 </div>
               )}
             </div>
+            */}
           </div>
             );
           })()

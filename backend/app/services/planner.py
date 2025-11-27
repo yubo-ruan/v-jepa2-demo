@@ -15,6 +15,10 @@ from app.models.schemas import (
     PlanningRequest,
     PlanningProgress,
     ActionResult,
+    TrajectoryRequest,
+    TrajectoryProgress,
+    TrajectoryResult,
+    TrajectoryStep,
 )
 from app.config import settings
 
@@ -34,6 +38,19 @@ class PlanningTask:
     start_time: Optional[float] = None
 
 
+@dataclass
+class TrajectoryTask:
+    """Represents a trajectory planning task."""
+    id: str
+    request: TrajectoryRequest
+    status: str = "queued"
+    progress: Optional[TrajectoryProgress] = None
+    result: Optional[TrajectoryResult] = None
+    error: Optional[str] = None
+    cancelled: bool = False
+    start_time: Optional[float] = None
+
+
 class PlannerService:
     """
     Planning service that uses V-JEPA2 for real inference.
@@ -47,6 +64,7 @@ class PlannerService:
 
     def __init__(self):
         self.tasks: OrderedDict[str, PlanningTask] = OrderedDict()  # LRU ordering
+        self.trajectory_tasks: OrderedDict[str, TrajectoryTask] = OrderedDict()  # Trajectory tasks
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._vjepa_inference = None
         self._model_loaded = False
@@ -496,6 +514,292 @@ class PlannerService:
         logger.info("Memory cleanup completed")
 
         # Trigger cleanup after task completion
+        self._cleanup_old_tasks()
+
+        return result
+
+    # =========================================================================
+    # Trajectory Planning Methods
+    # =========================================================================
+
+    def create_trajectory_task(self, request: TrajectoryRequest) -> str:
+        """Create a new trajectory planning task."""
+        self._cleanup_old_tasks()
+
+        task_id = str(uuid.uuid4())
+        task = TrajectoryTask(id=task_id, request=request)
+        self.trajectory_tasks[task_id] = task
+        self.trajectory_tasks.move_to_end(task_id)
+
+        return task_id
+
+    def get_trajectory_task(self, task_id: str) -> Optional[TrajectoryTask]:
+        """Get a trajectory task by ID."""
+        return self.trajectory_tasks.get(task_id)
+
+    def cancel_trajectory_task(self, task_id: str) -> bool:
+        """Cancel a running trajectory task."""
+        task = self.trajectory_tasks.get(task_id)
+        if task and task.status == "running":
+            task.cancelled = True
+            task.status = "cancelled"
+            return True
+        return False
+
+    async def run_trajectory_planning(
+        self,
+        task_id: str,
+        progress_callback: Optional[Callable[[TrajectoryProgress], None]] = None,
+    ) -> TrajectoryResult:
+        """
+        Run sequential trajectory planning using V-JEPA2.
+
+        Approach A: Sequential Planning toward Single Goal
+        - For each step, run CEM to find optimal action from current state to goal
+        - After each action, simulate the state update (using the world model's prediction)
+        - Repeat until we have num_steps actions
+
+        The key insight: V-JEPA2 AC model takes (current_frame, action) and predicts future frames.
+        We use the predicted frame as the "current" for the next planning step.
+        """
+        task = self.trajectory_tasks.get(task_id)
+        if not task:
+            raise ValueError(f"Trajectory task {task_id} not found")
+
+        task.status = "running"
+        task.start_time = time.time()
+
+        num_steps = task.request.num_steps
+        iterations = task.request.iterations
+        samples = task.request.samples
+        model_id = task.request.model
+
+        main_loop = asyncio.get_running_loop()
+
+        # Load model if needed (similar to regular planning)
+        from app.services.vjepa2 import get_model_loader
+        loader = get_model_loader()
+
+        if not loader.is_loaded(model_id):
+            model_size_gb = loader.get_model_size_gb(model_id)
+            has_checkpoint = loader.has_checkpoint(model_id)
+            is_cached = loader.is_cached(model_id)
+
+            loading_progress = TrajectoryProgress(
+                status="loading_model",
+                model_loading=model_id,
+                download_progress=1.0 if (has_checkpoint or is_cached) else 0.0,
+                download_total_gb=model_size_gb,
+                download_downloaded_gb=model_size_gb if (has_checkpoint or is_cached) else 0.0,
+                current_step=0,
+                total_steps=num_steps,
+                iteration=0,
+                total_iterations=iterations,
+                best_energy=0.0,
+                samples_evaluated=0,
+                elapsed_seconds=0.0,
+                eta_seconds=0.0,
+                completed_steps=[],
+            )
+            task.progress = loading_progress
+
+            if progress_callback:
+                main_loop.call_soon_threadsafe(
+                    lambda p=loading_progress: main_loop.create_task(progress_callback(p))
+                )
+                await asyncio.sleep(0.1)
+
+        # Load images
+        logger.info(f"[Trajectory] Loading images for trajectory task {task_id}")
+        current_img = self._load_image_from_upload(task.request.current_image)
+        goal_img = self._load_image_from_upload(task.request.goal_image)
+
+        if current_img is None or goal_img is None:
+            task.status = "failed"
+            task.error = "Could not load images"
+            raise ValueError(task.error)
+
+        # Get inference service
+        inference = await main_loop.run_in_executor(
+            None, lambda: self._get_inference(model_id)
+        )
+
+        if inference is None:
+            task.status = "failed"
+            task.error = "V-JEPA2 model not available"
+            raise RuntimeError(task.error)
+
+        # Send encoding status
+        encoding_progress = TrajectoryProgress(
+            status="encoding",
+            current_step=0,
+            total_steps=num_steps,
+            iteration=0,
+            total_iterations=iterations,
+            best_energy=0.0,
+            samples_evaluated=0,
+            elapsed_seconds=0.0,
+            eta_seconds=0.0,
+            completed_steps=[],
+        )
+        task.progress = encoding_progress
+
+        if progress_callback:
+            main_loop.call_soon_threadsafe(
+                lambda p=encoding_progress: main_loop.create_task(progress_callback(p))
+            )
+            await asyncio.sleep(0.05)
+
+        # Sequential trajectory planning
+        completed_steps: list[TrajectoryStep] = []
+        current_state_img = current_img  # Start from initial image
+
+        for step_idx in range(num_steps):
+            if task.cancelled:
+                raise asyncio.CancelledError("Task cancelled by user")
+
+            logger.info(f"[Trajectory] Step {step_idx + 1}/{num_steps}")
+
+            # Track energy history for this step
+            step_energy_history = []
+
+            # CEM progress callback for this step
+            def cem_progress_for_step(iteration: int, total: int, best_energy: float, best_action, step=step_idx):
+                nonlocal step_energy_history
+
+                if task.cancelled:
+                    raise asyncio.CancelledError("Task cancelled by user")
+
+                step_energy_history.append(round(best_energy, 3))
+
+                elapsed = time.time() - task.start_time
+                # Estimate total time: (elapsed / (completed_steps + current_progress)) * total_steps
+                steps_done = step + (iteration / total if total > 0 else 0)
+                if steps_done > 0:
+                    eta = (elapsed / steps_done) * (num_steps - steps_done)
+                else:
+                    eta = 0
+
+                progress = TrajectoryProgress(
+                    status="running",
+                    current_step=step,
+                    total_steps=num_steps,
+                    iteration=iteration,
+                    total_iterations=total,
+                    best_energy=round(best_energy, 3),
+                    energy_history=step_energy_history.copy(),
+                    samples_evaluated=iteration * samples,
+                    elapsed_seconds=round(elapsed, 1),
+                    eta_seconds=round(eta, 1),
+                    completed_steps=completed_steps.copy(),
+                )
+
+                task.progress = progress
+
+                if progress_callback:
+                    main_loop.call_soon_threadsafe(
+                        lambda p=progress: main_loop.create_task(progress_callback(p))
+                    )
+
+            # Run CEM for this step
+            try:
+                cem_result = await main_loop.run_in_executor(
+                    None,
+                    lambda: inference.run_cem(
+                        current_image=current_state_img,
+                        goal_image=goal_img,
+                        num_samples=samples,
+                        num_iterations=iterations,
+                        elite_fraction=0.1,
+                        progress_callback=cem_progress_for_step,
+                    )
+                )
+            except asyncio.CancelledError:
+                task.status = "cancelled"
+                raise
+            except Exception as e:
+                task.status = "failed"
+                task.error = f"CEM failed at step {step_idx}: {str(e)}"
+                logger.error(task.error, exc_info=True)
+                raise RuntimeError(task.error) from e
+
+            # Record this step
+            step_result = TrajectoryStep(
+                step=step_idx,
+                action=cem_result["action"],
+                energy=cem_result["energy"],
+                confidence=cem_result["confidence"],
+                energy_history=cem_result["energy_history"],
+            )
+            completed_steps.append(step_result)
+
+            logger.info(f"[Trajectory] Step {step_idx + 1} complete: action={step_result.action}, energy={step_result.energy:.3f}")
+
+            # Simulate state update for next step using the world model
+            # The AC model predicts the next frame given (current_frame, action)
+            if step_idx < num_steps - 1:  # Don't need prediction after last step
+                try:
+                    # Use the inference service to predict the next state
+                    predicted_img = await main_loop.run_in_executor(
+                        None,
+                        lambda action=cem_result["action"]: inference.predict_next_frame(
+                            current_image=current_state_img,
+                            action=action,
+                        )
+                    )
+
+                    if predicted_img is not None:
+                        # Use predicted image as next state
+                        current_state_img = predicted_img
+                        logger.info(f"[Trajectory] Using predicted frame for next step")
+                    else:
+                        # Fallback: keep using current image (less accurate but works)
+                        logger.warning(f"[Trajectory] Could not predict next frame, continuing with current")
+
+                except Exception as e:
+                    logger.warning(f"[Trajectory] Failed to predict next frame: {e}, continuing with current")
+                    # Continue with current image - trajectory will be less accurate but still valid
+
+            # Clear cache between steps to prevent memory buildup
+            inference.clear_cache(aggressive=False)
+
+        # Final cleanup
+        inference.clear_cache(aggressive=True)
+        # Clean up image references (current_state_img may have been updated during trajectory)
+        if current_state_img is not current_img:
+            del current_state_img
+        del current_img
+        del goal_img
+
+        # Compute trajectory statistics
+        total_energy = sum(s.energy for s in completed_steps)
+        avg_energy = total_energy / len(completed_steps) if completed_steps else 0
+        avg_confidence = sum(s.confidence for s in completed_steps) / len(completed_steps) if completed_steps else 0
+
+        result = TrajectoryResult(
+            steps=completed_steps,
+            total_energy=round(total_energy, 3),
+            avg_energy=round(avg_energy, 3),
+            avg_confidence=round(avg_confidence, 3),
+            is_ac_model=cem_result.get("is_ac_model", False) if completed_steps else False,
+        )
+
+        task.result = result
+        task.status = "completed"
+
+        logger.info(f"[Trajectory] Planning completed: {len(completed_steps)} steps, avg_energy={avg_energy:.3f}")
+
+        # Memory cleanup
+        import gc
+        import torch
+
+        gc.collect()
+        if inference.device.type == "mps":
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+        elif inference.device.type == "cuda":
+            torch.cuda.empty_cache()
+
         self._cleanup_old_tasks()
 
         return result

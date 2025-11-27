@@ -16,7 +16,7 @@ import {
   RetryIcon,
   AlertIcon,
 } from "@/components/icons";
-import { EnergyLandscape, IterationReplay } from "@/components/visualizations";
+import { IterationReplay, TrajectoryTimeline } from "@/components/visualizations";
 import { PlanningResultValidation } from "@/components/visualizations/PlanningResultValidation";
 import { styles, Spinner, Modal, focusRing } from "@/components/ui";
 import { usePlanning, useToast, useModels } from "@/contexts";
@@ -44,9 +44,11 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
     estimatedTime,
     currentImageUploadId,
     goalImageUploadId,
+    setMode,
+    setTrajectorySteps,
   } = usePlanning();
 
-  const { preset, samples, iterations, currentImage, goalImage, hasResults, isProcessing, progress, result, error } = planningState;
+  const { preset, samples, iterations, currentImage, goalImage, hasResults, isProcessing, progress, result, error, mode, trajectorySteps, trajectoryProgress, trajectoryResult } = planningState;
   const { showToast } = useToast();
 
   // Track selected action from energy landscape
@@ -362,6 +364,77 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
       <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6 mb-8">
         <h3 className="text-base font-semibold text-zinc-300 mb-5">Planning Controls</h3>
 
+        {/* Mode Toggle */}
+        <div className="mb-5">
+          <label className="text-sm text-zinc-300 mb-2 block flex items-center gap-2">
+            Planning Mode
+            <span className="group relative">
+              <HelpIcon />
+              <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-zinc-700 text-xs text-zinc-200 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-10">
+                Single: One optimal action. Trajectory: Sequence of actions over time.
+              </span>
+            </span>
+          </label>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setMode("single")}
+              disabled={isProcessing}
+              className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                mode === "single"
+                  ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white"
+                  : "bg-zinc-700 text-zinc-300 hover:bg-zinc-600"
+              } ${isProcessing ? "opacity-50 cursor-not-allowed" : ""}`}
+            >
+              Single Action
+            </button>
+            <button
+              onClick={() => setMode("trajectory")}
+              disabled={isProcessing}
+              className={`flex-1 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                mode === "trajectory"
+                  ? "bg-gradient-to-r from-emerald-600 to-teal-600 text-white"
+                  : "bg-zinc-700 text-zinc-300 hover:bg-zinc-600"
+              } ${isProcessing ? "opacity-50 cursor-not-allowed" : ""}`}
+            >
+              Trajectory
+            </button>
+          </div>
+        </div>
+
+        {/* Trajectory Steps Slider - only show in trajectory mode */}
+        {mode === "trajectory" && (
+          <div className="mb-5 p-4 bg-zinc-900 rounded-lg border border-emerald-500/20">
+            <div className="flex justify-between text-sm mb-2">
+              <span className="text-zinc-300 flex items-center gap-2">
+                Trajectory Steps
+                <span className="group relative">
+                  <HelpIcon />
+                  <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-zinc-700 text-xs text-zinc-200 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-10">
+                    Number of sequential actions to plan. More steps = longer planning.
+                  </span>
+                </span>
+              </span>
+              <span className="text-emerald-400 font-medium">{trajectorySteps} steps</span>
+            </div>
+            <input
+              type="range"
+              min="2"
+              max="10"
+              value={trajectorySteps}
+              onChange={(e) => setTrajectorySteps(Number(e.target.value))}
+              className={styles.slider}
+              disabled={isProcessing}
+            />
+            <div className="flex justify-between text-xs text-zinc-600 mt-1">
+              <span>Quick (2)</span>
+              <span>Detailed (10)</span>
+            </div>
+            <p className="text-xs text-zinc-500 mt-2">
+              Est. time: ~{Math.round(trajectorySteps * estimatedTime * 0.8)} min ({trajectorySteps} × CEM optimization)
+            </p>
+          </div>
+        )}
+
         {/* Preset Buttons with tooltips */}
         <div className="flex gap-2 mb-5">
           {planningPresets.map((p) => (
@@ -494,12 +567,14 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
               onClick={handleStartPlanning}
               className={`px-5 py-2.5 rounded-lg transition-all text-sm font-medium flex items-center gap-2 ${
                 canGenerate && loadedModel
-                  ? "bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:scale-[1.02] active:scale-[0.98]"
+                  ? mode === "trajectory"
+                    ? "bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 hover:scale-[1.02] active:scale-[0.98]"
+                    : "bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-lg shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:scale-[1.02] active:scale-[0.98]"
                   : "bg-zinc-700 text-zinc-500 cursor-not-allowed"
               }`}
             >
               {canGenerate && loadedModel && <RocketIcon />}
-              Generate Plan
+              {mode === "trajectory" ? `Generate Trajectory (${trajectorySteps} steps)` : "Generate Plan"}
             </button>
             {canGenerate && loadedModel && (
               <span className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
@@ -691,8 +766,19 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
         )}
       </div>
 
-      {/* Iteration Replay - shows after results are available */}
-      {hasResults && result?.energyHistory && (
+      {/* Trajectory Timeline - shows in trajectory mode */}
+      {mode === "trajectory" && (isProcessing || hasResults) && (
+        <div className="mb-8">
+          <TrajectoryTimeline
+            progress={trajectoryProgress}
+            result={trajectoryResult}
+            isProcessing={isProcessing}
+          />
+        </div>
+      )}
+
+      {/* Iteration Replay - shows after results are available (single action mode only) */}
+      {mode === "single" && hasResults && result?.energyHistory && (
         <div className="mb-8">
           <IterationReplay
             iterations={result.energyHistory.map((energy, index) => ({
@@ -711,8 +797,8 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
         </div>
       )}
 
-      {/* Planning Result Validation */}
-      {hasResults && result && currentImage && goalImage && (
+      {/* Planning Result Validation - single action mode only */}
+      {mode === "single" && hasResults && result && currentImage && goalImage && (
         <div className="mb-8">
           <PlanningResultValidation
             currentImage={currentImage}
@@ -730,9 +816,11 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
 
       {/* Results Display */}
       <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
-        <h3 className="text-base font-semibold text-zinc-300 mb-5">Results Display</h3>
+        <h3 className="text-base font-semibold text-zinc-300 mb-5">
+          {mode === "trajectory" ? "Trajectory Results" : "Results Display"}
+        </h3>
 
-        {hasResults ? (
+        {hasResults && mode === "single" ? (
           (() => {
             // Calculate arrow rotation from action vector [x, y, z]
             const calculateArrowAngle = (action: number[]) => {
@@ -997,12 +1085,64 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
           </div>
             );
           })()
+        ) : hasResults && mode === "trajectory" && trajectoryResult ? (
+          // Trajectory results summary
+          <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="bg-zinc-900 rounded-lg p-4">
+                <p className="text-xs text-zinc-500 mb-1">Total Steps</p>
+                <p className="text-2xl font-semibold text-emerald-400">{trajectoryResult.steps.length}</p>
+              </div>
+              <div className="bg-zinc-900 rounded-lg p-4">
+                <p className="text-xs text-zinc-500 mb-1">Avg Energy</p>
+                <p className="text-2xl font-semibold text-amber-400">{trajectoryResult.avgEnergy.toFixed(2)}</p>
+              </div>
+              <div className="bg-zinc-900 rounded-lg p-4">
+                <p className="text-xs text-zinc-500 mb-1">Avg Confidence</p>
+                <p className="text-2xl font-semibold text-green-400">{(trajectoryResult.avgConfidence * 100).toFixed(0)}%</p>
+              </div>
+              <div className="bg-zinc-900 rounded-lg p-4">
+                <p className="text-xs text-zinc-500 mb-1">Model Type</p>
+                <p className="text-2xl font-semibold text-purple-400">{trajectoryResult.isAcModel ? "AC" : "Std"}</p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  // Export trajectory as JSON
+                  const exportData = {
+                    timestamp: new Date().toISOString(),
+                    model: loadedModel || "unknown",
+                    mode: "trajectory",
+                    parameters: { samples, iterations, trajectorySteps },
+                    result: trajectoryResult,
+                  };
+                  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `vjepa2-trajectory-${Date.now()}.json`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                  showToast("Trajectory exported successfully", "success");
+                }}
+                className="px-4 py-2.5 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg transition-all text-sm hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2"
+              >
+                <ExportIcon />
+                Export Trajectory
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="flex flex-col items-center justify-center py-12 text-center">
             <div className="w-16 h-16 rounded-full bg-zinc-900 flex items-center justify-center mb-4">
               <ResultsIcon />
             </div>
-            <p className="text-zinc-300 text-sm font-medium mb-2">Awaiting Planning Results</p>
+            <p className="text-zinc-300 text-sm font-medium mb-2">
+              {mode === "trajectory" ? "Awaiting Trajectory Results" : "Awaiting Planning Results"}
+            </p>
             <p className="text-zinc-500 text-xs max-w-sm leading-relaxed">
               {!currentImage && !goalImage
                 ? "Start by uploading a current state and goal state image above."
@@ -1010,10 +1150,12 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
                   ? "Upload a current state image to continue."
                   : !goalImage
                     ? "Upload a goal state image to continue."
-                    : "Both images uploaded! Click Generate Plan to predict the optimal action."}
+                    : mode === "trajectory"
+                      ? `Both images uploaded! Click Generate Trajectory to plan ${trajectorySteps} sequential actions.`
+                      : "Both images uploaded! Click Generate Plan to predict the optimal action."}
             </p>
             {currentImage && goalImage && (
-              <div className="mt-4 flex items-center gap-2 text-xs text-indigo-400">
+              <div className={`mt-4 flex items-center gap-2 text-xs ${mode === "trajectory" ? "text-emerald-400" : "text-indigo-400"}`}>
                 <CheckCircleIcon className="w-4 h-4" />
                 <span>Ready to generate</span>
               </div>

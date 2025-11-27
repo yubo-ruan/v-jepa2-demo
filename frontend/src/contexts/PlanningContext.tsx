@@ -3,7 +3,7 @@
 import { createContext, useContext, useState, useCallback, useMemo, useRef, useEffect, type ReactNode } from "react";
 import type { PlanningState, PresetType } from "@/types";
 import { planningPresets, defaultPlanningState } from "@/constants/sampleData";
-import { api, type PlanningProgress, type ActionResult } from "@/lib/api";
+import { api, type PlanningProgress, type ActionResult, type TrajectoryProgress, type TrajectoryResult } from "@/lib/api";
 import { useHistory } from "./HistoryContext";
 
 // Helper to fetch with timeout (prevents hanging on stale blob URLs)
@@ -24,6 +24,9 @@ async function fetchWithTimeout(url: string, timeoutMs: number = 5000): Promise<
   }
 }
 
+// Planning mode type
+type PlanningMode = "single" | "trajectory";
+
 // Extended planning state with backend data
 interface ExtendedPlanningState extends PlanningState {
   taskId: string | null;
@@ -39,6 +42,11 @@ interface ExtendedPlanningState extends PlanningState {
   // Track previous images to detect changes
   previousCurrentImage: string | null;
   previousGoalImage: string | null;
+  // Trajectory planning
+  mode: PlanningMode;
+  trajectorySteps: number;  // Number of steps in trajectory (2-20)
+  trajectoryProgress: TrajectoryProgress | null;
+  trajectoryResult: TrajectoryResult | null;
 }
 
 interface PlanningContextType {
@@ -59,6 +67,9 @@ interface PlanningContextType {
   // Expose upload IDs for components that need to fetch energy data
   currentImageUploadId: string | null;
   goalImageUploadId: string | null;
+  // Trajectory mode
+  setMode: (mode: PlanningMode) => void;
+  setTrajectorySteps: (steps: number) => void;
 }
 
 const PlanningContext = createContext<PlanningContextType | null>(null);
@@ -163,6 +174,11 @@ const DEFAULT_STATE: ExtendedPlanningState = {
   planningModel: null,
   previousCurrentImage: null,
   previousGoalImage: null,
+  // Trajectory defaults
+  mode: "single",
+  trajectorySteps: 5,
+  trajectoryProgress: null,
+  trajectoryResult: null,
 };
 
 export function PlanningProvider({ children }: { children: ReactNode }) {
@@ -225,9 +241,24 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  const setMode = useCallback((mode: PlanningMode) => {
+    setPlanningState((prev) => ({
+      ...prev,
+      mode,
+      // Clear results when switching modes
+      hasResults: false,
+      result: null,
+      trajectoryResult: null,
+    }));
+  }, []);
+
+  const setTrajectorySteps = useCallback((trajectorySteps: number) => {
+    setPlanningState((prev) => ({ ...prev, trajectorySteps }));
+  }, []);
+
   const startPlanning = useCallback(async (model: string) => {
     // Use ref to get the latest state (avoid stale closure)
-    const { currentImage, goalImage, samples, iterations, currentImageUploadId, goalImageUploadId, previousCurrentImage, previousGoalImage } = planningStateRef.current;
+    const { currentImage, goalImage, samples, iterations, currentImageUploadId, goalImageUploadId, previousCurrentImage, previousGoalImage, mode, trajectorySteps } = planningStateRef.current;
 
     if (!currentImage || !goalImage) {
       return;
@@ -352,9 +383,104 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
         throw new Error("Images must be uploaded to the backend before planning. Please try uploading again.");
       }
 
-      console.log('[PlanningContext] Starting planning with refs:', { currentImageRef, goalImageRef, model });
+      console.log('[PlanningContext] Starting planning with refs:', { currentImageRef, goalImageRef, model, mode });
 
-      // Start planning task on backend
+      // Branch based on planning mode
+      if (mode === "trajectory") {
+        // Trajectory planning mode
+        console.log('[PlanningContext] Starting trajectory planning...');
+        let taskId;
+        try {
+          const response = await api.startTrajectoryPlanning({
+            currentImage: currentImageRef,
+            goalImage: goalImageRef,
+            model,
+            numSteps: trajectorySteps,
+            samples,
+            iterations,
+          });
+          taskId = response.taskId;
+          console.log('[PlanningContext] Trajectory planning started, taskId:', taskId);
+        } catch (apiError) {
+          console.error('[PlanningContext] api.startTrajectoryPlanning failed:', apiError);
+          const errorMsg = apiError instanceof Error ? apiError.message : String(apiError);
+          const isUploadError = errorMsg.toLowerCase().includes('upload not found') ||
+                                errorMsg.toLowerCase().includes('re-upload');
+          if (isUploadError) {
+            setPlanningState((prev) => ({
+              ...prev,
+              currentImageUploadId: null,
+              goalImageUploadId: null,
+              previousCurrentImage: null,
+              previousGoalImage: null,
+            }));
+            throw new Error("Images need to be re-uploaded. Please try again.");
+          }
+          throw apiError;
+        }
+
+        // Update task ID
+        setPlanningState((prev) => ({
+          ...prev,
+          taskId,
+          previousCurrentImage: currentImage,
+          previousGoalImage: goalImage,
+        }));
+
+        // Subscribe to trajectory progress WebSocket
+        console.log('[PlanningContext] Subscribing to trajectory WebSocket for task:', taskId);
+        const subscription = api.subscribeToTrajectoryProgress(taskId, {
+          onProgress: (trajectoryProgress) => {
+            console.log('[PlanningContext] Trajectory progress:', trajectoryProgress);
+            setPlanningState((prev) => ({ ...prev, trajectoryProgress }));
+          },
+          onComplete: (trajectoryResult) => {
+            console.log('[PlanningContext] Trajectory completed:', trajectoryResult);
+            setPlanningState((prev) => ({
+              ...prev,
+              isProcessing: false,
+              hasResults: true,
+              trajectoryResult,
+            }));
+            wsRef.current = null;
+          },
+          onError: (error) => {
+            console.error('[PlanningContext] Trajectory error:', error);
+            const lowerError = error.toLowerCase();
+            const isImageError = lowerError.includes('could not load images') ||
+                                 lowerError.includes('upload not found') ||
+                                 lowerError.includes('re-upload');
+            if (isImageError) {
+              setPlanningState((prev) => ({
+                ...prev,
+                isProcessing: false,
+                error: "Images need to be re-uploaded. Please try again.",
+                currentImageUploadId: null,
+                goalImageUploadId: null,
+                previousCurrentImage: null,
+                previousGoalImage: null,
+              }));
+            } else {
+              setPlanningState((prev) => ({
+                ...prev,
+                isProcessing: false,
+                error,
+              }));
+            }
+            wsRef.current = null;
+          },
+          onCancelled: () => {
+            console.log('[PlanningContext] Trajectory cancelled');
+            setPlanningState((prev) => ({ ...prev, isProcessing: false }));
+            wsRef.current = null;
+          },
+        });
+
+        wsRef.current = subscription;
+        return;  // Exit early for trajectory mode
+      }
+
+      // Single action planning mode (existing logic)
       console.log('[PlanningContext] Calling api.startPlanning...');
       let taskId;
       try {
@@ -587,6 +713,8 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       estimatedCost,
       currentImageUploadId: planningState.currentImageUploadId,
       goalImageUploadId: planningState.goalImageUploadId,
+      setMode,
+      setTrajectorySteps,
     }),
     [
       planningState,
@@ -603,6 +731,8 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       canGenerate,
       estimatedTime,
       estimatedCost,
+      setMode,
+      setTrajectorySteps,
     ]
   );
 

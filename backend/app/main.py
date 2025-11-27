@@ -75,35 +75,44 @@ async def websocket_planning(websocket: WebSocket, task_id: str):
     WebSocket endpoint for real-time planning progress.
 
     Connect to receive progress updates for a specific planning task.
+    Supports both regular planning tasks and trajectory planning tasks.
     Messages are JSON with format: {"type": "progress|completed|error", "data": {...}}
     """
-    # Check if task exists
+    # Check if task exists (regular planning or trajectory)
     task = planner.get_task(task_id)
-    if not task:
+    trajectory_task = planner.get_trajectory_task(task_id)
+
+    if not task and not trajectory_task:
         await websocket.close(code=4004, reason="Task not found")
         return
+
+    # Use whichever task type exists
+    active_task = task or trajectory_task
+    is_trajectory = trajectory_task is not None
 
     await ws_manager.connect(task_id, websocket)
 
     try:
         # Send current state immediately based on task status
-        if task.status == "completed" and task.result:
+        if active_task.status == "completed" and active_task.result:
+            msg_type = "trajectory_completed" if is_trajectory else "completed"
             await websocket.send_json({
-                "type": "completed",
-                "data": task.result.model_dump()
+                "type": msg_type,
+                "data": active_task.result.model_dump()
             })
-        elif task.status == "failed":
+        elif active_task.status == "failed":
             await websocket.send_json({
                 "type": "error",
-                "data": {"message": task.error or "Unknown error"}
+                "data": {"message": active_task.error or "Unknown error"}
             })
-        elif task.status == "cancelled":
+        elif active_task.status == "cancelled":
             await websocket.send_json({"type": "cancelled", "data": {}})
-        elif task.status == "running" and task.progress:
+        elif active_task.status == "running" and active_task.progress:
             # Send current progress (including loading_model status)
+            msg_type = "trajectory_progress" if is_trajectory else "progress"
             await websocket.send_json({
-                "type": "progress",
-                "data": task.progress.model_dump()
+                "type": msg_type,
+                "data": active_task.progress.model_dump()
             })
 
         # Keep connection open to receive updates
@@ -111,7 +120,11 @@ async def websocket_planning(websocket: WebSocket, task_id: str):
             # Wait for messages from client (ping/pong, cancel requests)
             data = await websocket.receive_text()
             if data == "cancel":
-                planner.cancel_task(task_id)
+                # Cancel the appropriate task type
+                if is_trajectory:
+                    planner.cancel_trajectory_task(task_id)
+                else:
+                    planner.cancel_task(task_id)
                 await websocket.send_json({"type": "cancelled", "data": {}})
                 break
 

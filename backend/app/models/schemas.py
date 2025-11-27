@@ -90,6 +90,79 @@ class EvaluateActionsResponse(BaseModel):
 
 
 # =============================================================================
+# Trajectory Planning Schemas
+# =============================================================================
+
+class TrajectoryStep(BaseModel):
+    """A single step in a trajectory."""
+    step: int  # 0-indexed step number
+    action: List[float]  # [x, y, z] or 7D for AC models
+    energy: float
+    confidence: float
+    energy_history: List[float] = []  # CEM convergence for this step
+
+
+class TrajectoryRequest(BaseModel):
+    """Request to start a trajectory planning task."""
+    current_image: str  # base64 or upload_id
+    goal_image: str  # base64 or upload_id
+    model: str = "vit-giant"
+    num_steps: int = Field(default=5, ge=2, le=20)  # Number of actions in trajectory
+    samples: int = Field(default=400, ge=50, le=1000)
+    iterations: int = Field(default=10, ge=3, le=20)
+    elite_fraction: float = Field(default=0.1, ge=0.05, le=0.3)
+
+
+class TrajectoryProgress(BaseModel):
+    """Progress update during trajectory planning."""
+    status: Literal["loading_model", "encoding", "running", "completed"] = "running"
+    model_loading: Optional[str] = None
+    download_progress: Optional[float] = None
+    download_total_gb: Optional[float] = None
+    download_downloaded_gb: Optional[float] = None
+    download_speed_mbps: Optional[float] = None
+    download_eta_seconds: Optional[float] = None
+    # Trajectory-specific progress
+    current_step: int = 0  # Which step of the trajectory we're on
+    total_steps: int = 0  # Total steps in trajectory
+    # CEM progress within current step
+    iteration: int = 0
+    total_iterations: int = 0
+    best_energy: float = 0.0
+    energy_history: List[float] = []
+    samples_evaluated: int = 0
+    elapsed_seconds: float = 0.0
+    eta_seconds: float = 0.0
+    # Completed steps so far
+    completed_steps: List[TrajectoryStep] = []
+
+
+class TrajectoryResult(BaseModel):
+    """Result of trajectory planning - sequence of optimal actions."""
+    steps: List[TrajectoryStep]
+    total_energy: float  # Sum of energies across all steps
+    avg_energy: float  # Average energy per step
+    avg_confidence: float  # Average confidence per step
+    is_ac_model: bool = False
+
+
+class TrajectoryTaskResponse(BaseModel):
+    """Response when creating a trajectory planning task."""
+    task_id: str
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+    websocket_url: str
+
+
+class TrajectoryResultResponse(BaseModel):
+    """Full trajectory planning task status and result."""
+    task_id: str
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+    progress: Optional[TrajectoryProgress] = None
+    result: Optional[TrajectoryResult] = None
+    error: Optional[str] = None
+
+
+# =============================================================================
 # Model Management Schemas
 # =============================================================================
 

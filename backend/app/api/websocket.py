@@ -101,6 +101,16 @@ class WebSocketManager:
         """Broadcast cancellation."""
         await self.send_message(task_id, {"type": "cancelled", "data": {}})
 
+    async def broadcast_trajectory_progress(self, task_id: str, progress: dict):
+        """Broadcast trajectory planning progress update."""
+        await self.send_message(task_id, {"type": "trajectory_progress", "data": progress})
+
+    async def broadcast_trajectory_completed(self, task_id: str, result: dict):
+        """Broadcast trajectory planning completion."""
+        logger.info(f"[WebSocket] Broadcasting trajectory completion for task {task_id}")
+        num_sent = await self.send_message(task_id, {"type": "trajectory_completed", "data": result})
+        logger.info(f"[WebSocket] Trajectory completion sent to {num_sent} clients")
+
 
 # Singleton instance
 ws_manager = WebSocketManager()

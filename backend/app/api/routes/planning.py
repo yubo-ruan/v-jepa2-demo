@@ -11,6 +11,10 @@ from app.models.schemas import (
     PlanningProgress,
     EvaluateActionsRequest,
     EvaluateActionsResponse,
+    TrajectoryRequest,
+    TrajectoryTaskResponse,
+    TrajectoryResultResponse,
+    TrajectoryProgress,
 )
 from app.services.planner import planner
 from app.services.vjepa2 import get_inference
@@ -201,3 +205,118 @@ async def evaluate_actions(request: EvaluateActionsRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Energy evaluation failed: {str(e)}")
+
+
+# =============================================================================
+# Trajectory Planning Endpoints
+# =============================================================================
+
+async def _run_trajectory_with_ws(task_id: str):
+    """Run trajectory planning and broadcast progress via WebSocket."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    async def progress_callback(progress: TrajectoryProgress):
+        await ws_manager.broadcast_trajectory_progress(task_id, progress.model_dump())
+
+    try:
+        logger.info(f"[Trajectory] Starting trajectory planning for task {task_id}")
+        result = await planner.run_trajectory_planning(task_id, progress_callback)
+        logger.info(f"[Trajectory] Planning completed for task {task_id}")
+        await ws_manager.broadcast_trajectory_completed(task_id, result.model_dump())
+    except asyncio.CancelledError:
+        logger.info(f"[Trajectory] Task {task_id} cancelled")
+        await ws_manager.broadcast_cancelled(task_id)
+    except Exception as e:
+        logger.error(f"[Trajectory] Task {task_id} failed with error: {e}")
+        await ws_manager.broadcast_error(task_id, str(e))
+    finally:
+        if task_id in _background_tasks:
+            del _background_tasks[task_id]
+
+
+@router.post("/trajectory", response_model=TrajectoryTaskResponse)
+async def create_trajectory_task(request: TrajectoryRequest):
+    """
+    Start a new trajectory planning task.
+
+    This generates a sequence of actions (trajectory) to reach the goal.
+    Uses sequential CEM planning: each step plans from current→goal,
+    then simulates the state transition for the next step.
+
+    Args:
+        request: Contains current/goal images, num_steps, model, samples, iterations
+
+    Returns:
+        task_id: Use this to subscribe to WebSocket updates or poll status
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Validate images exist
+    current_image = request.current_image
+    goal_image = request.goal_image
+
+    def is_upload_id(ref: str) -> bool:
+        import re
+        return bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', ref, re.I))
+
+    if is_upload_id(current_image) and not upload_exists(current_image):
+        raise HTTPException(status_code=400, detail="Current image upload not found")
+
+    if is_upload_id(goal_image) and not upload_exists(goal_image):
+        raise HTTPException(status_code=400, detail="Goal image upload not found")
+
+    # Cancel lingering tasks
+    if _background_tasks:
+        logger.info(f"Cancelling {len(_background_tasks)} lingering background task(s)")
+        for old_task_id, old_task in list(_background_tasks.items()):
+            if not old_task.done():
+                old_task.cancel()
+            _background_tasks.pop(old_task_id, None)
+
+    task_id = planner.create_trajectory_task(request)
+    logger.info(f"[Trajectory] Created task {task_id} with {request.num_steps} steps")
+
+    # Start background task
+    bg_task = asyncio.create_task(_run_trajectory_with_ws(task_id))
+    _background_tasks[task_id] = bg_task
+
+    return TrajectoryTaskResponse(
+        task_id=task_id,
+        status="queued",
+        websocket_url=f"/ws/plan/{task_id}",
+    )
+
+
+@router.get("/trajectory/{task_id}", response_model=TrajectoryResultResponse)
+async def get_trajectory_status(task_id: str):
+    """Get the current status and result of a trajectory planning task."""
+    task = planner.get_trajectory_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Trajectory task not found")
+
+    return TrajectoryResultResponse(
+        task_id=task.id,
+        status=task.status,
+        progress=task.progress,
+        result=task.result,
+        error=task.error,
+    )
+
+
+@router.post("/trajectory/{task_id}/cancel")
+async def cancel_trajectory_task(task_id: str):
+    """Cancel a running trajectory planning task."""
+    task = planner.get_trajectory_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Trajectory task not found")
+
+    if task.status != "running":
+        raise HTTPException(status_code=400, detail=f"Cannot cancel task with status: {task.status}")
+
+    success = planner.cancel_trajectory_task(task_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Failed to cancel task")
+
+    return {"status": "cancelled", "task_id": task_id}

@@ -71,7 +71,7 @@ export function UploadPage() {
   const loadedModelInfo = models.find(m => m.id === loadedModel);
 
   // Simulator context for importing images and sending actions to simulator
-  const { simulatorState, setPendingAction, goToSimulator } = useSimulator();
+  const { simulatorState, setPendingAction, goToSimulator, setSimulatorImage, setInitialized } = useSimulator();
   const hasSimulatorImage = simulatorState.currentImage !== null;
 
   // Import simulator image as current state
@@ -94,17 +94,48 @@ export function UploadPage() {
     }
   }, [simulatorState.currentImage, setGoalImage, showToast]);
 
-  // Import simulator image for step-by-step trajectory planning
-  const handleImportFromSimulatorForStepByStep = useCallback(async () => {
-    if (!simulatorState.currentImage) {
-      showToast("No simulator image available", "error");
-      return;
-    }
+  // Track if we're initializing the simulator
+  const [isInitializingSimulator, setIsInitializingSimulator] = useState(false);
 
+  // Import simulator image for step-by-step trajectory planning
+  // This will auto-initialize the simulator if not already initialized
+  const handleImportFromSimulatorForStepByStep = useCallback(async () => {
     try {
+      let imageBase64 = simulatorState.currentImage;
+
+      // If simulator is not initialized or no image available, initialize it first
+      if (!simulatorState.isInitialized || !imageBase64) {
+        setIsInitializingSimulator(true);
+        showToast("Initializing simulator...", "info");
+
+        try {
+          const initResult = await api.initializeSimulator("Lift");
+          if (initResult.success && initResult.imageBase64) {
+            imageBase64 = initResult.imageBase64;
+            // Update simulator context state
+            setSimulatorImage(imageBase64);
+            setInitialized(true);
+            showToast("Simulator initialized!", "success");
+          } else {
+            throw new Error("Failed to initialize simulator");
+          }
+        } catch (initError) {
+          console.error("Failed to initialize simulator:", initError);
+          showToast(`Failed to initialize simulator: ${initError instanceof Error ? initError.message : "Unknown error"}`, "error");
+          setIsInitializingSimulator(false);
+          return;
+        } finally {
+          setIsInitializingSimulator(false);
+        }
+      }
+
+      if (!imageBase64) {
+        showToast("No simulator image available", "error");
+        return;
+      }
+
       // Convert base64 to blob for upload
-      const base64Data = simulatorState.currentImage;
-      const byteCharacters = atob(base64Data);
+      const byteCharacters = atob(imageBase64);
       const byteNumbers = new Array(byteCharacters.length);
       for (let i = 0; i < byteCharacters.length; i++) {
         byteNumbers[i] = byteCharacters.charCodeAt(i);
@@ -114,7 +145,7 @@ export function UploadPage() {
       const file = new File([blob], "simulator-observation.jpg", { type: "image/jpeg" });
 
       // Create data URL for display in the timeline
-      const inputImageDataUrl = `data:image/jpeg;base64,${base64Data}`;
+      const inputImageDataUrl = `data:image/jpeg;base64,${imageBase64}`;
 
       // Upload the image
       showToast("Uploading simulator observation...", "info");
@@ -126,7 +157,7 @@ export function UploadPage() {
       console.error("Failed to import simulator image for step-by-step:", error);
       showToast(`Failed to import image: ${error instanceof Error ? error.message : "Unknown error"}`, "error");
     }
-  }, [simulatorState.currentImage, planNextStep, showToast]);
+  }, [simulatorState.currentImage, simulatorState.isInitialized, planNextStep, showToast, setSimulatorImage, setInitialized]);
 
   // Navigate to simulator with the action pre-loaded
   const navigateToSimulatorWithAction = useCallback(() => {
@@ -923,6 +954,7 @@ export function UploadPage() {
             stepByStepState={stepByStep}
             totalStepsTarget={trajectorySteps}
             isSimulatorInitialized={simulatorState.isInitialized}
+            isInitializingSimulator={isInitializingSimulator}
             onImportFromSimulator={handleImportFromSimulatorForStepByStep}
             onSimulateAction={handleSimulateStepAction}
           />

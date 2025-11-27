@@ -3,13 +3,31 @@
 import io
 import logging
 import base64
+import hashlib
 from typing import List, Optional
 
+import numpy as np
+from PIL import Image
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_image_stats(img: Image.Image) -> dict:
+    """Compute diagnostic statistics for an image to detect black/corrupted frames."""
+    img_array = np.array(img)
+    nonzero_count = int(np.count_nonzero(img_array))
+    total_pixels = int(img_array.size)
+    return {
+        "shape": img_array.shape,
+        "min": float(img_array.min()),
+        "max": float(img_array.max()),
+        "mean": float(img_array.mean()),
+        "nonzero_pct": float(nonzero_count / total_pixels * 100) if total_pixels > 0 else 0,
+        "md5": hashlib.md5(img_array.tobytes()).hexdigest()[:12],
+    }
 
 router = APIRouter(prefix="/simulator", tags=["simulator"])
 
@@ -114,6 +132,13 @@ async def initialize_simulator(task: str = "Lift"):
         initial_image = sim.initialize(task=task)
         _simulator_initialized = True
 
+        # Diagnostic: Check initial image stats
+        img_stats = _compute_image_stats(initial_image)
+        logger.info(
+            f"[Simulator] Init frame stats: nonzero={img_stats['nonzero_pct']:.1f}%, "
+            f"mean={img_stats['mean']:.1f}, md5={img_stats['md5']}"
+        )
+
         # Convert PIL Image to base64
         buffer = io.BytesIO()
         initial_image.save(buffer, format="JPEG", quality=90)
@@ -157,6 +182,21 @@ async def step_simulator(request: SimulatorStepRequest):
 
         # Execute the action
         result = sim.execute_action(request.action)
+
+        # Diagnostic: Check image before encoding
+        img_stats = _compute_image_stats(result["image"])
+        is_corrupted = img_stats["nonzero_pct"] < 5.0
+        if is_corrupted:
+            logger.warning(
+                f"[Simulator] ⚠️ CORRUPTED FRAME DETECTED before encoding! "
+                f"nonzero={img_stats['nonzero_pct']:.1f}%, mean={img_stats['mean']:.1f}, "
+                f"md5={img_stats['md5']}, shape={img_stats['shape']}"
+            )
+        else:
+            logger.info(
+                f"[Simulator] Frame stats: nonzero={img_stats['nonzero_pct']:.1f}%, "
+                f"mean={img_stats['mean']:.1f}, md5={img_stats['md5']}"
+            )
 
         # Convert PIL Image to base64
         buffer = io.BytesIO()

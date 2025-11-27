@@ -17,11 +17,15 @@ class RoboSuiteSimulator:
     Converts V-JEPA2/DROID action format to RoboSuite OSC_POSE format.
     """
 
+    # Refresh renderer every N steps to prevent OpenGL buffer corruption
+    RENDERER_REFRESH_INTERVAL = 20
+
     def __init__(self):
         """Initialize the simulator wrapper (lazy loads robosuite)."""
         self.env = None
         self.task = None
         self._initialized = False
+        self._step_count = 0
 
     def is_initialized(self) -> bool:
         """Check if the simulator is initialized."""
@@ -68,6 +72,7 @@ class RoboSuiteSimulator:
 
         self.task = task
         self._initialized = True
+        self._step_count = 0
 
         # Reset and get initial observation
         obs = self.env.reset()
@@ -128,21 +133,30 @@ class RoboSuiteSimulator:
 
         # Execute action
         obs, reward, done, info = self.env.step(transformed_action)
+        self._step_count += 1
 
-        # Get robot state from observation
-        robot_state = None
-        gripper_state = None
+        # Extract only the data we need (observation filtering for memory efficiency)
+        # Don't keep reference to full obs dict
+        robot_state = obs.get('robot0_eef_pos')
+        if robot_state is not None:
+            robot_state = robot_state.copy()
 
-        # End-effector position is available in observation
-        if 'robot0_eef_pos' in obs:
-            robot_state = obs['robot0_eef_pos'].copy()
-        # Gripper state from observation
-        if 'robot0_gripper_qpos' in obs:
-            gripper_state = obs['robot0_gripper_qpos'].copy()
+        gripper_state = obs.get('robot0_gripper_qpos')
+        if gripper_state is not None:
+            gripper_state = gripper_state.copy()
+
+        image = self._obs_to_image(obs)
+
+        # Clear reference to obs dict
+        del obs
+
+        # Periodic renderer refresh to prevent OpenGL buffer corruption
+        if self._step_count >= self.RENDERER_REFRESH_INTERVAL:
+            self._refresh_renderer()
 
         return {
             "success": True,
-            "image": self._obs_to_image(obs),
+            "image": image,
             "robot_state": robot_state,
             "gripper_state": gripper_state,
             "reward": float(reward),
@@ -150,6 +164,37 @@ class RoboSuiteSimulator:
             "raw_action": raw_action,
             "transformed_action": transformed_action.tolist(),
         }
+
+    def _refresh_renderer(self):
+        """
+        Refresh the offscreen renderer to prevent OpenGL buffer corruption.
+
+        MuJoCo's offscreen renderer can get corrupted after many frames.
+        This saves state, reinitializes the environment, and restores state.
+        """
+        if self.env is None:
+            return
+
+        logger.info(f"[RoboSuiteSimulator] Refreshing renderer after {self._step_count} steps")
+
+        # Save current state
+        sim_state = self.env.sim.get_state()
+        rng_state = None
+        if hasattr(self.env, "np_random") and self.env.np_random is not None:
+            rng_state = self.env.np_random.bit_generator.state
+
+        # Reinitialize environment (creates fresh OpenGL context)
+        self.initialize(task=self.task)
+
+        # Restore physics state
+        self.env.sim.set_state(sim_state)
+        self.env.sim.forward()
+
+        # Restore RNG
+        if rng_state is not None and hasattr(self.env, "np_random") and self.env.np_random is not None:
+            self.env.np_random.bit_generator.state = rng_state
+
+        logger.info("[RoboSuiteSimulator] Renderer refreshed successfully")
 
     def _transform_action(self, action: np.ndarray) -> np.ndarray:
         """
@@ -282,10 +327,10 @@ class RoboSuiteSimulator:
 
         logger.info(f"[RoboSuiteSimulator] Loading state for task: {task}")
 
-        # Reinitialize env if needed (must match original config)
-        if self.env is None or self.task != task:
-            logger.info(f"[RoboSuiteSimulator] Reinitializing environment for task: {task}")
-            self.initialize(task=task)
+        # ALWAYS reinitialize to get a fresh rendering context
+        # This fixes OpenGL buffer corruption that happens after many frames
+        logger.info(f"[RoboSuiteSimulator] Reinitializing environment for clean render context")
+        self.initialize(task=task)
 
         # Restore MuJoCo sim state
         self.env.sim.set_state(sim_state)
@@ -297,17 +342,7 @@ class RoboSuiteSimulator:
 
         logger.info("[RoboSuiteSimulator] State restored successfully")
 
-        # After restoring state, we need to properly update the rendering context.
-        # The safest way is to take a zero-action step which properly syncs everything.
-        # This ensures the offscreen renderer buffer is properly populated.
-        zero_action = np.zeros(self.env.action_dim)
-        obs, _, _, _ = self.env.step(zero_action)
-
-        # Now restore the state again (the step may have slightly changed it)
-        self.env.sim.set_state(sim_state)
-        self.env.sim.forward()
-
-        # Get the final observation with properly rendered image
+        # Get the observation with properly rendered image
         obs = self.env._get_observations()
         return self._obs_to_image(obs)
 
@@ -320,10 +355,21 @@ class RoboSuiteSimulator:
             self.env = None
         self._initialized = False
         self.task = None
+        self._step_count = 0
 
         # Aggressive memory cleanup after closing simulator
         # MuJoCo can hold significant memory that needs to be released
         gc.collect()
         gc.collect()  # Second pass for cyclic references
+
+        # On Apple Silicon, also clear MPS cache to release GPU memory
+        try:
+            import torch
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+                torch.mps.synchronize()
+                logger.info("[RoboSuiteSimulator] MPS cache cleared")
+        except Exception:
+            pass  # MPS not available or torch not imported
 
         logger.info("[RoboSuiteSimulator] Closed and memory cleaned")

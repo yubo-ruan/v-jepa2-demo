@@ -1,6 +1,7 @@
 """RoboSuite simulator wrapper for V-JEPA2 action testing."""
 
 import logging
+import pickle
 from typing import Dict, Any, List, Optional
 
 import numpy as np
@@ -230,10 +231,99 @@ class RoboSuiteSimulator:
 
         return Image.fromarray(img_array.astype(np.uint8))
 
+    def save_state(self) -> bytes:
+        """
+        Save current simulator state to bytes (for download).
+
+        Returns:
+            bytes: Pickled state data containing:
+                - sim_state: MuJoCo qpos, qvel, act, time
+                - rng_state: NumPy RNG state for reproducibility
+                - task: Current task name
+
+        Raises:
+            RuntimeError: If simulator is not initialized
+        """
+        if self.env is None or not self._initialized:
+            raise RuntimeError("Simulator not initialized")
+
+        sim_state = self.env.sim.get_state()
+        rng_state = None
+        if hasattr(self.env, "np_random") and self.env.np_random is not None:
+            rng_state = self.env.np_random.bit_generator.state
+
+        payload = {
+            "sim_state": sim_state,
+            "rng_state": rng_state,
+            "task": self.task,
+        }
+
+        logger.info(f"[RoboSuiteSimulator] Saving state for task: {self.task}")
+        return pickle.dumps(payload)
+
+    def load_state(self, state_data: bytes) -> Image.Image:
+        """
+        Load simulator state from bytes.
+
+        Args:
+            state_data: Pickled state data from save_state()
+
+        Returns:
+            PIL Image of the restored state
+
+        Raises:
+            RuntimeError: If state data is invalid
+        """
+        payload = pickle.loads(state_data)
+
+        sim_state = payload["sim_state"]
+        rng_state = payload.get("rng_state")
+        task = payload.get("task", "Lift")
+
+        logger.info(f"[RoboSuiteSimulator] Loading state for task: {task}")
+
+        # Reinitialize env if needed (must match original config)
+        if self.env is None or self.task != task:
+            logger.info(f"[RoboSuiteSimulator] Reinitializing environment for task: {task}")
+            self.initialize(task=task)
+
+        # Restore MuJoCo sim state
+        self.env.sim.set_state(sim_state)
+        self.env.sim.forward()  # Recompute derived quantities
+
+        # Restore RNG if saved
+        if rng_state is not None and hasattr(self.env, "np_random") and self.env.np_random is not None:
+            self.env.np_random.bit_generator.state = rng_state
+
+        logger.info("[RoboSuiteSimulator] State restored successfully")
+
+        # After restoring state, we need to properly update the rendering context.
+        # The safest way is to take a zero-action step which properly syncs everything.
+        # This ensures the offscreen renderer buffer is properly populated.
+        zero_action = np.zeros(self.env.action_dim)
+        obs, _, _, _ = self.env.step(zero_action)
+
+        # Now restore the state again (the step may have slightly changed it)
+        self.env.sim.set_state(sim_state)
+        self.env.sim.forward()
+
+        # Get the final observation with properly rendered image
+        obs = self.env._get_observations()
+        return self._obs_to_image(obs)
+
     def close(self):
         """Close the simulator and release resources."""
+        import gc
+
         if self.env is not None:
             self.env.close()
             self.env = None
         self._initialized = False
-        logger.info("[RoboSuiteSimulator] Closed")
+        self.task = None
+
+        # Aggressive memory cleanup after closing simulator
+        # MuJoCo can hold significant memory that needs to be released
+        gc.collect()
+        gc.collect()  # Second pass for cyclic references
+
+        logger.info("[RoboSuiteSimulator] Closed and memory cleaned")

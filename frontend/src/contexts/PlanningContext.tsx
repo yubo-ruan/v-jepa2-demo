@@ -175,7 +175,7 @@ const DEFAULT_STATE: ExtendedPlanningState = {
   previousCurrentImage: null,
   previousGoalImage: null,
   // Trajectory defaults
-  mode: "trajectory",
+  mode: "single",
   trajectorySteps: 5,
   trajectoryProgress: null,
   trajectoryResult: null,

@@ -20,7 +20,7 @@ import { IterationReplay, TrajectoryTimeline } from "@/components/visualizations
 import { PlanningResultValidation } from "@/components/visualizations/PlanningResultValidation";
 import { ModelManagementTable } from "@/components/ModelManagementTable";
 import { styles, Spinner, Modal, focusRing } from "@/components/ui";
-import { usePlanning, useToast, useModels } from "@/contexts";
+import { usePlanning, useToast, useModels, useSimulator } from "@/contexts";
 import { planningPresets, config } from "@/constants";
 import { ACTION_DISPLAY_SCALING, ACTION_LABELS, ACTION_COLORS } from "@/constants/actionDisplay";
 
@@ -63,6 +63,30 @@ export function UploadPage() {
     cancelDownload,
   } = useModels();
   const loadedModelInfo = models.find(m => m.id === loadedModel);
+
+  // Simulator context for importing images
+  const { simulatorState } = useSimulator();
+  const hasSimulatorImage = simulatorState.currentImage !== null;
+
+  // Import simulator image as current state
+  const importSimulatorAsCurrentImage = useCallback(() => {
+    if (simulatorState.currentImage) {
+      // Convert base64 to data URL for display
+      const dataUrl = `data:image/jpeg;base64,${simulatorState.currentImage}`;
+      setCurrentImage(dataUrl);
+      showToast("Imported simulator image as current state", "success");
+    }
+  }, [simulatorState.currentImage, setCurrentImage, showToast]);
+
+  // Import simulator image as goal state
+  const importSimulatorAsGoalImage = useCallback(() => {
+    if (simulatorState.currentImage) {
+      // Convert base64 to data URL for display
+      const dataUrl = `data:image/jpeg;base64,${simulatorState.currentImage}`;
+      setGoalImage(dataUrl);
+      showToast("Imported simulator image as goal state", "success");
+    }
+  }, [simulatorState.currentImage, setGoalImage, showToast]);
 
   const [showDetailsModal, setShowDetailsModal] = useState(false);
 
@@ -276,7 +300,21 @@ export function UploadPage() {
       {/* Current / Goal Display */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
         <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
-          <h3 className="text-base font-semibold text-zinc-300 mb-4">Where you are now</h3>
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-base font-semibold text-zinc-300">Where you are now</h3>
+            {hasSimulatorImage && (
+              <button
+                onClick={importSimulatorAsCurrentImage}
+                className="px-3 py-1.5 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors flex items-center gap-1.5"
+                title="Import current view from Simulator"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                From Simulator
+              </button>
+            )}
+          </div>
           <input
             type="file"
             id="current-image-input"
@@ -293,14 +331,14 @@ export function UploadPage() {
             onKeyDown={(e) => handleKeyDown(e, "current-image-input")}
             onDrop={(e) => handleDrop(e, "current")}
             onDragOver={handleDragOver}
-            className={`min-h-[200px] bg-zinc-900 rounded-lg border-2 border-dashed border-zinc-600 hover:border-indigo-500 hover:bg-indigo-500/5 transition-all cursor-pointer flex flex-col items-center justify-center gap-4 group p-8 relative overflow-hidden ${focusRing}`}
+            className={`min-h-[280px] bg-zinc-900 rounded-lg border-2 border-dashed border-zinc-600 hover:border-indigo-500 hover:bg-indigo-500/5 transition-all cursor-pointer flex flex-col items-center justify-center gap-4 group p-8 relative overflow-hidden ${focusRing}`}
           >
             {currentImage && currentImage !== "demo" ? (
               <>
                 <img
                   src={currentImage}
                   alt="Current state"
-                  className="absolute inset-0 w-full h-full object-cover"
+                  className="absolute inset-0 w-full h-full object-contain"
                 />
                 <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center">
                   <p className="text-white text-sm font-medium">Click to change</p>
@@ -328,7 +366,21 @@ export function UploadPage() {
           </div>
         </div>
         <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
-          <h3 className="text-base font-semibold text-zinc-300 mb-4">Where you want to be</h3>
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-base font-semibold text-zinc-300">Where you want to be</h3>
+            {hasSimulatorImage && (
+              <button
+                onClick={importSimulatorAsGoalImage}
+                className="px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition-colors flex items-center gap-1.5"
+                title="Import current view from Simulator"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                From Simulator
+              </button>
+            )}
+          </div>
           <input
             type="file"
             id="goal-image-input"
@@ -345,14 +397,14 @@ export function UploadPage() {
             onKeyDown={(e) => handleKeyDown(e, "goal-image-input")}
             onDrop={(e) => handleDrop(e, "goal")}
             onDragOver={handleDragOver}
-            className={`min-h-[200px] bg-zinc-900 rounded-lg border-2 border-dashed border-zinc-600 hover:border-emerald-500 hover:bg-emerald-500/5 transition-all cursor-pointer flex flex-col items-center justify-center gap-4 group p-8 relative overflow-hidden ${focusRing}`}
+            className={`min-h-[280px] bg-zinc-900 rounded-lg border-2 border-dashed border-zinc-600 hover:border-emerald-500 hover:bg-emerald-500/5 transition-all cursor-pointer flex flex-col items-center justify-center gap-4 group p-8 relative overflow-hidden ${focusRing}`}
           >
             {goalImage && goalImage !== "demo" ? (
               <>
                 <img
                   src={goalImage}
                   alt="Goal state"
-                  className="absolute inset-0 w-full h-full object-cover"
+                  className="absolute inset-0 w-full h-full object-contain"
                 />
                 <div className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 transition-opacity flex items-center justify-center">
                   <p className="text-white text-sm font-medium">Click to change</p>
@@ -495,7 +547,7 @@ export function UploadPage() {
             </div>
             <input
               type="range"
-              min="50"
+              min="10"
               max="800"
               value={samples}
               onChange={(e) => setSamples(Number(e.target.value))}
@@ -521,7 +573,7 @@ export function UploadPage() {
             </div>
             <input
               type="range"
-              min="3"
+              min="1"
               max="15"
               value={iterations}
               onChange={(e) => setIterations(Number(e.target.value))}
@@ -573,10 +625,7 @@ export function UploadPage() {
                 </span>
               </div>
             ) : (
-              <div className="flex items-center justify-between w-full text-amber-400">
-                <span className="text-sm">No model loaded</span>
-                <span className="text-xs">Load one above ↑</span>
-              </div>
+              <span className="text-zinc-500 text-sm">No model loaded</span>
             )}
           </div>
           <div className="group relative">

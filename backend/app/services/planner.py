@@ -389,6 +389,36 @@ class PlannerService:
             task.error = "V-JEPA2 model not available"
             raise RuntimeError(task.error)
 
+        # CRITICAL: Aggressive memory cleanup BEFORE encoding
+        # This prevents SIGSEGV crashes on 16GB systems when running inference
+        # after simulator usage. The MPS allocator can get fragmented and
+        # fail to allocate memory for encoding even if "enough" memory exists.
+        import gc
+        import torch
+
+        logger.info("Pre-encoding memory cleanup starting...")
+
+        # First, run garbage collection to free Python objects
+        gc.collect()
+        gc.collect()  # Second pass catches cyclic references
+
+        # For MPS (Apple Silicon), do aggressive cleanup
+        if inference.device.type == "mps":
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+            # Additional GC passes after MPS sync
+            for _ in range(3):
+                gc.collect()
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+            logger.info("MPS memory cleared before encoding")
+        elif inference.device.type == "cuda":
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info("CUDA memory cleared before encoding")
+
         # Send "Encoding images..." status before CEM starts
         encoding_progress = PlanningProgress(
             status="encoding",

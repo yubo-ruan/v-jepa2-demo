@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { api } from "@/lib/api";
-import { usePlanning } from "@/contexts";
+import { usePlanning, useSimulator } from "@/contexts";
 
 // Available RoboSuite tasks
 const ROBOSUITE_TASKS = [
@@ -54,6 +54,19 @@ export function SimulatorPage() {
   // Get planning result for import action feature
   const { planningState } = usePlanning();
   const hasInferenceResult = planningState.result && planningState.result.action.length === 7;
+
+  // Sync simulator image with shared context for cross-page access
+  const { setSimulatorImage, setInitialized } = useSimulator();
+
+  // Sync currentImage to shared context whenever it changes
+  useEffect(() => {
+    setSimulatorImage(currentImage);
+  }, [currentImage, setSimulatorImage]);
+
+  // Sync initialized status to shared context
+  useEffect(() => {
+    setInitialized(status?.initialized ?? false);
+  }, [status?.initialized, setInitialized]);
 
   // Import action from inference result
   // The planning result stores raw action values (meters, radians, gripper [-1,1])
@@ -162,6 +175,41 @@ export function SimulatorPage() {
       randomInRange(-1, 1),        // Gripper
     ]);
   };
+
+  // Save simulator state to local file
+  const saveState = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await api.saveSimulatorState();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save state");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Load simulator state from file
+  const loadState = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api.loadSimulatorState(file);
+      setCurrentImage(result.imageBase64);
+      setSelectedTask(result.task);
+      setStepResult(null);
+      await checkStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load state");
+    } finally {
+      setLoading(false);
+      // Reset file input
+      e.target.value = "";
+    }
+  }, [checkStatus]);
 
   // Track if space key is being held for continuous simulation
   const [isSpaceHeld, setIsSpaceHeld] = useState(false);
@@ -357,6 +405,45 @@ export function SimulatorPage() {
               >
                 Reset
               </button>
+            </div>
+
+            {/* Save/Load State */}
+            <div className="mt-4 pt-4 border-t border-zinc-700">
+              <h3 className="text-sm font-medium text-zinc-400 mb-3">State Management</h3>
+              <div className="flex gap-3">
+                <button
+                  onClick={saveState}
+                  disabled={loading || !status?.initialized}
+                  className="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-600 disabled:cursor-not-allowed text-white text-sm rounded-lg transition-colors flex items-center justify-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  Save State
+                </button>
+                <div className="flex-1">
+                  <input
+                    type="file"
+                    id="load-state-input"
+                    accept=".pkl"
+                    onChange={loadState}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => document.getElementById("load-state-input")?.click()}
+                    disabled={loading}
+                    className="w-full px-3 py-2 bg-amber-600 hover:bg-amber-500 disabled:bg-zinc-600 disabled:cursor-not-allowed text-white text-sm rounded-lg transition-colors flex items-center justify-center gap-2"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    Load State
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs text-zinc-500 mt-2">
+                Save simulator state before running inference. Load to restore later.
+              </p>
             </div>
           </div>
 

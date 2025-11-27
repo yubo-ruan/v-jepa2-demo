@@ -191,6 +191,9 @@ async def load_model(model_id: str):
     Returns immediately with status "loading", actual load happens in background.
     Unloads any currently loaded model first.
 
+    On Apple Silicon (16GB), this also auto-closes the simulator to prevent
+    MPS memory fragmentation crashes.
+
     Supports hot-switching: if a model is currently loading, it will be cancelled
     and the new model will start loading immediately.
     """
@@ -200,6 +203,16 @@ async def load_model(model_id: str):
         raise HTTPException(status_code=404, detail="Model not found")
 
     loader = get_model_loader()
+
+    # ✅ AUTO-CLOSE SIMULATOR: Free memory before loading model (prevents MPS crashes)
+    # This is critical on 16GB Apple Silicon where simulator + model can't coexist
+    try:
+        from app.api.routes.simulator import _simulator, close_simulator
+        if _simulator is not None and _simulator.is_initialized():
+            logger.info("🔄 Auto-closing simulator before model load to prevent memory crash")
+            await close_simulator()
+    except Exception as e:
+        logger.warning(f"Could not auto-close simulator: {e}")
 
     # Check if already loaded
     if loader.is_loaded(model_id):

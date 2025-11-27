@@ -991,6 +991,62 @@ export const api = {
       method: "POST",
     });
   },
+
+  /**
+   * Save current simulator state and download as .pkl file.
+   * The file can be loaded later to restore the exact simulator state.
+   */
+  async saveSimulatorState(): Promise<void> {
+    const response = await fetch(`${API_BASE}/simulator/save-state`);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(error.detail || "Failed to save state");
+    }
+
+    // Trigger file download
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `simulator_state_${Date.now()}.pkl`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.URL.revokeObjectURL(url);
+  },
+
+  /**
+   * Load simulator state from a .pkl file.
+   * This will restore the simulator to the exact state when saved.
+   */
+  async loadSimulatorState(file: File): Promise<{
+    success: boolean;
+    message: string;
+    imageBase64: string;
+    task: string;
+  }> {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const response = await fetch(`${API_BASE}/simulator/load-state`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(error.detail || "Failed to load state");
+    }
+
+    const data = await response.json();
+    return snakeToCamel(data) as {
+      success: boolean;
+      message: string;
+      imageBase64: string;
+      task: string;
+    };
+  },
 };
 
 export default api;

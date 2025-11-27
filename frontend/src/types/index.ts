@@ -42,7 +42,7 @@ export interface AdvancedConfig {
 
 // Planning types
 export interface PlanningParams {
-  preset: "quick" | "balanced" | "quality";
+  preset: "minimum" | "quick" | "balanced" | "quality";
   samples: number;
   iterations: number;
   model: string;
@@ -64,7 +64,7 @@ export type FilterOption = "all" | "high" | "medium" | "low" | "favorites";
 export type SortOption = "recent" | "confidence-high" | "confidence-low" | "time-long" | "time-short";
 
 // Preset type
-export type PresetType = "quick" | "balanced" | "quality";
+export type PresetType = "minimum" | "quick" | "balanced" | "quality";
 
 // Navigation state
 export interface NavState {

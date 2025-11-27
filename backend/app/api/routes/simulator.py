@@ -5,7 +5,7 @@ import logging
 import base64
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -241,6 +241,8 @@ async def reset_simulator():
 @router.post("/close")
 async def close_simulator():
     """Close the simulator and release resources."""
+    import gc
+
     global _simulator, _simulator_initialized
 
     logger.info("[Simulator] Close request")
@@ -249,6 +251,92 @@ async def close_simulator():
         _simulator.close()
         _simulator = None
         _simulator_initialized = False
-        logger.info("[Simulator] Closed successfully")
+
+        # Additional garbage collection after releasing the simulator reference
+        gc.collect()
+
+        logger.info("[Simulator] Closed successfully and memory released")
 
     return {"success": True, "message": "Simulator closed"}
+
+
+@router.get("/save-state")
+async def save_simulator_state():
+    """
+    Save current simulator state and return as downloadable file.
+
+    Returns:
+        Binary .pkl file containing simulator state (qpos, qvel, task, etc.)
+    """
+    logger.info("[Simulator] Save state request")
+
+    try:
+        sim = get_simulator()
+
+        if not sim.is_initialized():
+            raise HTTPException(
+                status_code=400,
+                detail="Simulator not initialized. Call /simulator/init first."
+            )
+
+        state_bytes = sim.save_state()
+
+        return Response(
+            content=state_bytes,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename=simulator_state_{sim.task}.pkl"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Simulator] Save state failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save state: {str(e)}")
+
+
+@router.post("/load-state")
+async def load_simulator_state(file: UploadFile = File(...)):
+    """
+    Load simulator state from uploaded .pkl file.
+
+    Args:
+        file: Uploaded .pkl state file
+
+    Returns:
+        New observation image after restoring state
+    """
+    logger.info(f"[Simulator] Load state request from file: {file.filename}")
+
+    try:
+        # Read uploaded file
+        state_bytes = await file.read()
+
+        # Get simulator instance (will create if not exists)
+        sim = get_simulator()
+
+        # Load state (will auto-initialize if needed)
+        image = sim.load_state(state_bytes)
+
+        # Update global initialization flag
+        global _simulator_initialized
+        _simulator_initialized = True
+
+        # Convert to base64
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=90)
+        image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        logger.info(f"[Simulator] State loaded successfully for task: {sim.task}")
+
+        return {
+            "success": True,
+            "message": "State loaded successfully",
+            "image_base64": image_base64,
+            "task": sim.task,
+        }
+
+    except Exception as e:
+        logger.error(f"[Simulator] Load state failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load state: {str(e)}")

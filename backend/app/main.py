@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.api.routes import (
     planning, models, experiments, upload, health, system, export, batch,
-    video, trajectory, compare, presets, analytics
+    video, trajectory, compare, presets, analytics, simulator
 )
 from app.api.websocket import ws_manager
 from app.services.planner import planner
@@ -58,6 +58,7 @@ app.include_router(trajectory.router, prefix="/api")
 app.include_router(compare.router, prefix="/api")
 app.include_router(presets.router, prefix="/api")
 app.include_router(analytics.router, prefix="/api")
+app.include_router(simulator.router, prefix="/api")
 
 
 @app.on_event("startup")

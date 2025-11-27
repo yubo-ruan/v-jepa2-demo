@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Header, Sidebar } from "@/components/layout";
-import { UploadPage, ConfigPage, HistoryPage } from "@/components/pages";
+import { UploadPage, ConfigPage, HistoryPage, SimulatorPage } from "@/components/pages";
 import { ResearchDashboard, type ResearchTab } from "@/components/research/ResearchDashboard";
 import { Toast } from "@/components/ui";
 import { ToastProvider, ConfigProvider, PlanningProvider, ModelsProvider, HistoryProvider, useToast } from "@/contexts";
@@ -32,6 +32,8 @@ function MainContent() {
           {activeTab === "inference" && <UploadPage onGoToConfig={() => setActiveTab("config")} />}
 
           {activeTab === "config" && <ConfigPage />}
+
+          {activeTab === "simulator" && <SimulatorPage />}
 
           {activeTab === "history" && (
             <HistoryPage onGoToUpload={() => setActiveTab("inference")} />

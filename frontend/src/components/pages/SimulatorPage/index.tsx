@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { api } from "@/lib/api";
+import { usePlanning } from "@/contexts";
 
 // Available RoboSuite tasks
 const ROBOSUITE_TASKS = [
@@ -37,6 +38,7 @@ interface StepResult {
   done: boolean;
   rawAction: number[];
   transformedAction: number[];
+  message?: string;
 }
 
 export function SimulatorPage() {
@@ -48,6 +50,19 @@ export function SimulatorPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stepCount, setStepCount] = useState(0);
+
+  // Get planning result for import action feature
+  const { planningState } = usePlanning();
+  const hasInferenceResult = planningState.result && planningState.result.action.length === 7;
+
+  // Import action from inference result
+  // The planning result stores raw action values (meters, radians, gripper [-1,1])
+  // which matches the simulator's expected input format
+  const importFromInference = useCallback(() => {
+    if (planningState.result && planningState.result.action.length === 7) {
+      setAction([...planningState.result.action]);
+    }
+  }, [planningState.result]);
 
   // Check simulator status
   const checkStatus = useCallback(async () => {
@@ -91,8 +106,14 @@ export function SimulatorPage() {
         done: result.done,
         rawAction: result.rawAction,
         transformedAction: result.transformedAction,
+        message: result.message,
       });
-      setStepCount((prev) => prev + 1);
+      // Reset step count if episode ended (auto-reset happened)
+      if (result.done) {
+        setStepCount(0);
+      } else {
+        setStepCount((prev) => prev + 1);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to execute action");
     } finally {
@@ -211,8 +232,14 @@ export function SimulatorPage() {
               done: result.done,
               rawAction: result.rawAction,
               transformedAction: result.transformedAction,
+              message: result.message,
             });
-            setStepCount((prev) => prev + 1);
+            // Reset step count if episode ended (auto-reset happened)
+            if (result.done) {
+              setStepCount(0);
+            } else {
+              setStepCount((prev) => prev + 1);
+            }
           }
         } catch (e) {
           setError(e instanceof Error ? e.message : "Failed to execute action");
@@ -339,12 +366,26 @@ export function SimulatorPage() {
               <h2 className="text-lg font-semibold text-white">
                 7-DOF Action Input
               </h2>
-              <button
-                onClick={generateRandomAction}
-                className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 hover:text-white text-sm rounded-lg transition-colors"
-              >
-                🎲 Random
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={importFromInference}
+                  disabled={!hasInferenceResult}
+                  title={hasInferenceResult ? "Import action from Inference result" : "Run inference first to import action"}
+                  className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+                    hasInferenceResult
+                      ? "bg-indigo-600 hover:bg-indigo-500 text-white"
+                      : "bg-zinc-700 text-zinc-500 cursor-not-allowed"
+                  }`}
+                >
+                  ⬇ Import
+                </button>
+                <button
+                  onClick={generateRandomAction}
+                  className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 hover:text-white text-sm rounded-lg transition-colors"
+                >
+                  🎲 Random
+                </button>
+              </div>
             </div>
             <div className="space-y-4">
               {ACTION_LABELS.map((item, index) => (
@@ -428,6 +469,12 @@ export function SimulatorPage() {
               <h2 className="text-lg font-semibold text-white mb-4">
                 Step Result
               </h2>
+              {/* Episode reset notification */}
+              {stepResult.done && (
+                <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-yellow-400 text-sm">
+                  Episode ended (horizon: 500 steps). Environment auto-reset.
+                </div>
+              )}
               <div className="space-y-3">
                 <div className="flex justify-between">
                   <span className="text-zinc-400">Reward</span>
@@ -439,10 +486,10 @@ export function SimulatorPage() {
                   <span className="text-zinc-400">Done</span>
                   <span
                     className={
-                      stepResult.done ? "text-green-400" : "text-zinc-300"
+                      stepResult.done ? "text-yellow-400" : "text-zinc-300"
                     }
                   >
-                    {stepResult.done ? "Yes" : "No"}
+                    {stepResult.done ? "Yes (Reset)" : "No"}
                   </span>
                 </div>
                 {stepResult.robotState && (

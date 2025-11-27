@@ -141,6 +141,8 @@ async def step_simulator(request: SimulatorStepRequest):
     - action[0-2]: Position delta (x, y, z) in meters, range ~[-0.05, 0.05]
     - action[3-5]: Rotation delta (roll, pitch, yaw) in radians, range ~[-0.1, 0.1]
     - action[6]: Gripper command, range ~[-0.75, 0.75] (negative=open, positive=close)
+
+    When the episode ends (done=True), the environment is automatically reset.
     """
     logger.info(f"[Simulator] Step request with action: {request.action}")
 
@@ -161,6 +163,18 @@ async def step_simulator(request: SimulatorStepRequest):
         result["image"].save(buffer, format="JPEG", quality=90)
         image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
+        message = "Action executed successfully"
+
+        # Auto-reset if episode is done (horizon reached or task completed)
+        if result["done"]:
+            logger.info("[Simulator] Episode done, auto-resetting environment")
+            reset_image = sim.reset()
+            # Use the reset image instead
+            buffer = io.BytesIO()
+            reset_image.save(buffer, format="JPEG", quality=90)
+            image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            message = "Episode ended (horizon reached). Environment auto-reset."
+
         logger.info(f"[Simulator] Step completed, reward: {result['reward']}, done: {result['done']}")
 
         return SimulatorStepResponse(
@@ -172,7 +186,7 @@ async def step_simulator(request: SimulatorStepRequest):
             done=result["done"],
             raw_action=result["raw_action"],
             transformed_action=result["transformed_action"],
-            message="Action executed successfully"
+            message=message
         )
 
     except HTTPException:

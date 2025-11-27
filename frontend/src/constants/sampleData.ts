@@ -23,7 +23,6 @@ export type NavTabId = typeof navTabs[number]["id"];
 
 // Config tabs
 export const configTabs = [
-  { id: "model" as const, label: "Model Preferences" },
   { id: "ui" as const, label: "UI Settings" },
   { id: "advanced" as const, label: "Advanced" },
 ] as const;

@@ -3,7 +3,6 @@
 import { useMemo } from "react";
 import {
   UploadIcon,
-  ConfigIcon,
   HistoryIcon,
   ResearchIcon,
   SimulatorIcon,
@@ -20,7 +19,6 @@ export function Sidebar({ isOpen, activeTab, onTabChange }: SidebarProps) {
   const navTabs = useMemo(() => [
     { id: "inference" as const, label: "Inference", icon: <UploadIcon /> },
     { id: "simulator" as const, label: "Simulator", icon: <SimulatorIcon /> },
-    { id: "config" as const, label: "Config", icon: <ConfigIcon /> },
     { id: "history" as const, label: "History", icon: <HistoryIcon /> },
     { id: "finetune" as const, label: "Fine-tune", icon: <ResearchIcon /> },
   ], []);

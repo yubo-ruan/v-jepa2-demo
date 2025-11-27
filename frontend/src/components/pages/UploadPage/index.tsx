@@ -18,16 +18,13 @@ import {
 } from "@/components/icons";
 import { IterationReplay, TrajectoryTimeline } from "@/components/visualizations";
 import { PlanningResultValidation } from "@/components/visualizations/PlanningResultValidation";
+import { ModelManagementTable } from "@/components/ModelManagementTable";
 import { styles, Spinner, Modal, focusRing } from "@/components/ui";
 import { usePlanning, useToast, useModels } from "@/contexts";
 import { planningPresets, config } from "@/constants";
 import { ACTION_DISPLAY_SCALING, ACTION_LABELS, ACTION_COLORS } from "@/constants/actionDisplay";
 
-interface UploadPageProps {
-  onGoToConfig: () => void;
-}
-
-export function UploadPage({ onGoToConfig }: UploadPageProps) {
+export function UploadPage() {
   const {
     planningState,
     setPreset,
@@ -55,7 +52,16 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
   const [selectedAction, setSelectedAction] = useState<{ action: [number, number, number]; energy: number } | null>(null);
 
   // Model management from useModels hook
-  const { models, loadedModel, isLoading: isLoadingModels } = useModels();
+  const {
+    models,
+    loadedModel,
+    isLoading: isLoadingModels,
+    isActioning,
+    loadModel,
+    unloadModel,
+    downloadModel,
+    cancelDownload,
+  } = useModels();
   const loadedModelInfo = models.find(m => m.id === loadedModel);
 
   const [showDetailsModal, setShowDetailsModal] = useState(false);
@@ -252,6 +258,21 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
 
   return (
     <>
+      {/* Model Management Section */}
+      <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6 mb-8">
+        <h3 className="text-base font-semibold text-zinc-300 mb-5">Model Management</h3>
+        <ModelManagementTable
+          models={models}
+          loadedModel={loadedModel}
+          isActioning={isActioning}
+          isLoading={isLoadingModels}
+          onLoad={loadModel}
+          onUnload={unloadModel}
+          onDownload={downloadModel}
+          onCancelDownload={cancelDownload}
+        />
+      </div>
+
       {/* Current / Goal Display */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
         <div className="bg-zinc-800 rounded-xl border border-zinc-700 p-6">
@@ -552,13 +573,10 @@ export function UploadPage({ onGoToConfig }: UploadPageProps) {
                 </span>
               </div>
             ) : (
-              <button
-                onClick={onGoToConfig}
-                className="flex items-center justify-between w-full text-amber-400 hover:text-amber-300 transition-colors"
-              >
+              <div className="flex items-center justify-between w-full text-amber-400">
                 <span className="text-sm">No model loaded</span>
-                <span className="text-xs">Go to Config &rarr;</span>
-              </button>
+                <span className="text-xs">Load one above ↑</span>
+              </div>
             )}
           </div>
           <div className="group relative">

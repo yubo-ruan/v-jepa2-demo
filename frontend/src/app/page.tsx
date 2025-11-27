@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Header, Sidebar } from "@/components/layout";
-import { UploadPage, ConfigPage, HistoryPage, SimulatorPage } from "@/components/pages";
+import { UploadPage, HistoryPage, SimulatorPage } from "@/components/pages";
 import { ResearchDashboard, type ResearchTab } from "@/components/research/ResearchDashboard";
 import { Toast } from "@/components/ui";
 import { ToastProvider, ConfigProvider, PlanningProvider, ModelsProvider, HistoryProvider, useToast } from "@/contexts";
@@ -29,9 +29,7 @@ function MainContent() {
           {/* Toast Notification */}
           <Toast message={toast.message} visible={toast.visible} type={toast.type} />
 
-          {activeTab === "inference" && <UploadPage onGoToConfig={() => setActiveTab("config")} />}
-
-          {activeTab === "config" && <ConfigPage />}
+          {activeTab === "inference" && <UploadPage />}
 
           {activeTab === "simulator" && <SimulatorPage />}
 

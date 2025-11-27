@@ -15,6 +15,9 @@ from app.models.schemas import (
     TrajectoryTaskResponse,
     TrajectoryResultResponse,
     TrajectoryProgress,
+    SingleStepRequest,
+    SingleStepResponse,
+    SingleStepResult,
 )
 from app.services.planner import planner
 from app.services.vjepa2 import get_inference
@@ -320,3 +323,68 @@ async def cancel_trajectory_task(task_id: str):
         raise HTTPException(status_code=400, detail="Failed to cancel task")
 
     return {"status": "cancelled", "task_id": task_id}
+
+
+# =============================================================================
+# Single-Step Trajectory Planning (Step-by-Step Mode)
+# =============================================================================
+
+@router.post("/trajectory/step", response_model=SingleStepResponse)
+async def plan_trajectory_step(request: SingleStepRequest):
+    """
+    Plan a single trajectory step (step-by-step mode).
+
+    This endpoint is used for interactive trajectory planning where:
+    - User provides a real observation from the simulator after each step
+    - No embedding rollout - each step uses actual visual feedback
+    - Returns synchronously after CEM completes
+
+    Args:
+        request: Contains current_image (from simulator), goal_image, model, samples, iterations, step_index
+
+    Returns:
+        SingleStepResponse with action, energy, confidence for this step
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Validate images exist
+    def is_upload_id(ref: str) -> bool:
+        import re
+        return bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', ref, re.I))
+
+    if is_upload_id(request.current_image) and not upload_exists(request.current_image):
+        return SingleStepResponse(
+            success=False,
+            error="Current image upload not found. Please re-upload from simulator."
+        )
+
+    if is_upload_id(request.goal_image) and not upload_exists(request.goal_image):
+        return SingleStepResponse(
+            success=False,
+            error="Goal image upload not found. Please re-upload the goal image."
+        )
+
+    logger.info(f"[SingleStep] Starting step {request.step_index} planning...")
+
+    try:
+        result = await planner.run_single_step_planning(
+            current_image_id=request.current_image,
+            goal_image_id=request.goal_image,
+            model_id=request.model,
+            samples=request.samples,
+            iterations=request.iterations,
+            step_index=request.step_index,
+        )
+
+        return SingleStepResponse(
+            success=True,
+            result=SingleStepResult(**result),
+        )
+
+    except Exception as e:
+        logger.error(f"[SingleStep] Step {request.step_index} failed: {e}", exc_info=True)
+        return SingleStepResponse(
+            success=False,
+            error=str(e),
+        )

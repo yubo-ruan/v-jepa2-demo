@@ -22,6 +22,7 @@ import { ModelManagementTable } from "@/components/ModelManagementTable";
 import { styles, Spinner, Modal, focusRing } from "@/components/ui";
 import { usePlanning, useToast, useModels, useSimulator } from "@/contexts";
 import { planningPresets, config } from "@/constants";
+import { api } from "@/lib/api";
 import { ACTION_DISPLAY_SCALING, ACTION_LABELS, ACTION_COLORS } from "@/constants/actionDisplay";
 
 export function UploadPage() {
@@ -43,9 +44,14 @@ export function UploadPage() {
     goalImageUploadId,
     setMode,
     setTrajectorySteps,
+    // Step-by-step trajectory methods
+    startStepByStep,
+    planNextStep,
+    resetStepByStep,
+    setStepByStepEnabled,
   } = usePlanning();
 
-  const { preset, samples, iterations, currentImage, goalImage, hasResults, isProcessing, progress, result, error, mode, trajectorySteps, trajectoryProgress, trajectoryResult } = planningState;
+  const { preset, samples, iterations, currentImage, goalImage, hasResults, isProcessing, progress, result, error, mode, trajectorySteps, trajectoryProgress, trajectoryResult, stepByStep, stepByStepEnabled } = planningState;
   const { showToast } = useToast();
 
   // Track selected action from energy landscape
@@ -64,8 +70,8 @@ export function UploadPage() {
   } = useModels();
   const loadedModelInfo = models.find(m => m.id === loadedModel);
 
-  // Simulator context for importing images
-  const { simulatorState } = useSimulator();
+  // Simulator context for importing images and sending actions to simulator
+  const { simulatorState, setPendingAction, goToSimulator } = useSimulator();
   const hasSimulatorImage = simulatorState.currentImage !== null;
 
   // Import simulator image as current state
@@ -87,6 +93,56 @@ export function UploadPage() {
       showToast("Imported simulator image as goal state", "success");
     }
   }, [simulatorState.currentImage, setGoalImage, showToast]);
+
+  // Import simulator image for step-by-step trajectory planning
+  const handleImportFromSimulatorForStepByStep = useCallback(async () => {
+    if (!simulatorState.currentImage) {
+      showToast("No simulator image available", "error");
+      return;
+    }
+
+    try {
+      // Convert base64 to blob for upload
+      const base64Data = simulatorState.currentImage;
+      const byteCharacters = atob(base64Data);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "image/jpeg" });
+      const file = new File([blob], "simulator-observation.jpg", { type: "image/jpeg" });
+
+      // Create data URL for display in the timeline
+      const inputImageDataUrl = `data:image/jpeg;base64,${base64Data}`;
+
+      // Upload the image
+      showToast("Uploading simulator observation...", "info");
+      const uploadResult = await api.uploadImage(file);
+
+      // Plan the next step with the uploaded image and its data URL for display
+      await planNextStep(uploadResult.uploadId, inputImageDataUrl);
+    } catch (error) {
+      console.error("Failed to import simulator image for step-by-step:", error);
+      showToast(`Failed to import image: ${error instanceof Error ? error.message : "Unknown error"}`, "error");
+    }
+  }, [simulatorState.currentImage, planNextStep, showToast]);
+
+  // Navigate to simulator with the action pre-loaded
+  const navigateToSimulatorWithAction = useCallback(() => {
+    if (result?.action) {
+      setPendingAction(result.action);
+      goToSimulator();
+    }
+  }, [result?.action, setPendingAction, goToSimulator]);
+
+  // Handle simulate action from trajectory timeline (step-by-step mode)
+  const handleSimulateStepAction = useCallback((action: number[]) => {
+    if (action && action.length === 7) {
+      setPendingAction(action);
+      goToSimulator();
+    }
+  }, [setPendingAction, goToSimulator]);
 
   const [showDetailsModal, setShowDetailsModal] = useState(false);
 
@@ -148,15 +204,21 @@ export function UploadPage() {
   }, [error, showToast]);
 
   // Wrapper to pass loaded model to planning
-  const handleStartPlanning = useCallback(() => {
-    console.log('[UploadPage] handleStartPlanning called, loadedModel:', loadedModel);
+  const handleStartPlanning = useCallback(async () => {
+    console.log('[UploadPage] handleStartPlanning called, loadedModel:', loadedModel, 'stepByStepEnabled:', stepByStepEnabled);
     if (loadedModel) {
-      console.log('[UploadPage] Calling startPlanning with model:', loadedModel);
-      startPlanning(loadedModel);
+      // If in trajectory mode and step-by-step is enabled, use step-by-step mode
+      if (mode === "trajectory" && stepByStepEnabled) {
+        console.log('[UploadPage] Starting step-by-step trajectory with model:', loadedModel);
+        await startStepByStep(loadedModel);
+      } else {
+        console.log('[UploadPage] Calling startPlanning with model:', loadedModel);
+        await startPlanning(loadedModel);
+      }
     } else {
       console.log('[UploadPage] No loaded model, skipping startPlanning');
     }
-  }, [loadedModel, startPlanning]);
+  }, [loadedModel, startPlanning, startStepByStep, mode, stepByStepEnabled]);
 
   // Keyboard shortcut: Cmd/Ctrl + Enter to generate plan
   useEffect(() => {
@@ -505,6 +567,39 @@ export function UploadPage() {
             <p className="text-xs text-zinc-500 mt-2">
               Est. time: ~{Math.round(trajectorySteps * estimatedTime * 0.8)} min ({trajectorySteps} × CEM optimization)
             </p>
+
+            {/* Step-by-Step Mode Toggle */}
+            <div className="mt-4 pt-4 border-t border-zinc-700">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-zinc-300">Step-by-Step Mode</span>
+                  <span className="group relative">
+                    <HelpIcon />
+                    <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 bg-zinc-700 text-xs text-zinc-200 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-10 w-64">
+                      Plan one step at a time. After each step, import a new observation from the simulator before continuing.
+                    </span>
+                  </span>
+                </div>
+                <button
+                  onClick={() => setStepByStepEnabled(!stepByStepEnabled)}
+                  disabled={isProcessing}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                    stepByStepEnabled ? "bg-emerald-600" : "bg-zinc-600"
+                  } ${isProcessing ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      stepByStepEnabled ? "translate-x-6" : "translate-x-1"
+                    }`}
+                  />
+                </button>
+              </div>
+              {stepByStepEnabled && (
+                <p className="text-xs text-emerald-400 mt-2">
+                  Step-by-step mode enabled. You'll provide real observations from the simulator after each planned action.
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -607,27 +702,8 @@ export function UploadPage() {
           </div>
         </div>
 
-        {/* Model Display and Actions */}
+        {/* Action Buttons */}
         <div className="flex flex-wrap gap-3 items-center">
-          {/* Read-only model display */}
-          <div className="px-4 py-2.5 bg-zinc-700 rounded-lg border border-zinc-600 min-w-[200px]">
-            {isLoadingModels ? (
-              <div className="flex items-center gap-2">
-                <Spinner size="sm" />
-                <span className="text-zinc-400 text-sm">Loading...</span>
-              </div>
-            ) : loadedModel ? (
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-200 text-sm">{loadedModelInfo?.name || loadedModel}</span>
-                <span className="text-xs text-green-400 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 bg-green-400 rounded-full" />
-                  Loaded
-                </span>
-              </div>
-            ) : (
-              <span className="text-zinc-500 text-sm">No model loaded</span>
-            )}
-          </div>
           <div className="group relative">
             <button
               disabled={!canGenerate || !loadedModel}
@@ -641,7 +717,11 @@ export function UploadPage() {
               }`}
             >
               {canGenerate && loadedModel && <RocketIcon />}
-              {mode === "trajectory" ? `Generate Trajectory (${trajectorySteps} steps)` : "Generate Plan"}
+              {mode === "trajectory"
+                ? stepByStepEnabled
+                  ? `Start Step-by-Step (${trajectorySteps} steps)`
+                  : `Generate Trajectory (${trajectorySteps} steps)`
+                : "Generate Plan"}
             </button>
             {canGenerate && loadedModel && (
               <span className="absolute -bottom-6 left-1/2 -translate-x-1/2 text-xs text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
@@ -833,13 +913,18 @@ export function UploadPage() {
         )}
       </div>
 
-      {/* Trajectory Timeline - shows in trajectory mode */}
-      {mode === "trajectory" && (isProcessing || hasResults) && (
+      {/* Trajectory Timeline - shows in trajectory mode (including step-by-step) */}
+      {mode === "trajectory" && (isProcessing || hasResults || stepByStep.status !== "idle") && (
         <div className="mb-8">
           <TrajectoryTimeline
             progress={trajectoryProgress}
             result={trajectoryResult}
             isProcessing={isProcessing}
+            stepByStepState={stepByStep}
+            totalStepsTarget={trajectorySteps}
+            isSimulatorInitialized={simulatorState.isInitialized}
+            onImportFromSimulator={handleImportFromSimulatorForStepByStep}
+            onSimulateAction={handleSimulateStepAction}
           />
         </div>
       )}
@@ -1101,6 +1186,16 @@ export function UploadPage() {
                   <ExportIcon />
                   Export
                 </button>
+                {result?.isAcModel && (
+                  <button
+                    onClick={navigateToSimulatorWithAction}
+                    className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition-all text-sm hover:scale-[1.02] active:scale-[0.98] flex items-center gap-2"
+                    title="Load action into simulator"
+                  >
+                    <RocketIcon />
+                    Simulate
+                  </button>
+                )}
               </div>
             </div>
 

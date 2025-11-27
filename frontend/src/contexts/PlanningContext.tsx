@@ -3,7 +3,7 @@
 import { createContext, useContext, useState, useCallback, useMemo, useRef, useEffect, type ReactNode } from "react";
 import type { PlanningState, PresetType } from "@/types";
 import { planningPresets, defaultPlanningState } from "@/constants/sampleData";
-import { api, type PlanningProgress, type ActionResult, type TrajectoryProgress, type TrajectoryResult } from "@/lib/api";
+import { api, type PlanningProgress, type ActionResult, type TrajectoryProgress, type TrajectoryResult, type SingleStepResult } from "@/lib/api";
 import { useHistory } from "./HistoryContext";
 
 // Helper to fetch with timeout (prevents hanging on stale blob URLs)
@@ -27,6 +27,22 @@ async function fetchWithTimeout(url: string, timeoutMs: number = 5000): Promise<
 // Planning mode type
 type PlanningMode = "single" | "trajectory";
 
+// Step-by-step trajectory state
+type StepByStepStatus = "idle" | "waiting_for_image" | "planning" | "completed";
+
+// Extended step result that includes the input image for display
+interface SingleStepResultWithImage extends SingleStepResult {
+  inputImageDataUrl?: string;  // Base64 data URL of input image for display
+}
+
+interface StepByStepState {
+  status: StepByStepStatus;
+  currentStepIndex: number;       // Which step we're on (0-based)
+  completedSteps: SingleStepResultWithImage[];  // All completed steps with images
+  currentStepProgress: number | null;  // Progress within current step (0-100)
+  error: string | null;
+}
+
 // Extended planning state with backend data
 interface ExtendedPlanningState extends PlanningState {
   taskId: string | null;
@@ -47,6 +63,9 @@ interface ExtendedPlanningState extends PlanningState {
   trajectorySteps: number;  // Number of steps in trajectory (2-20)
   trajectoryProgress: TrajectoryProgress | null;
   trajectoryResult: TrajectoryResult | null;
+  // Step-by-step trajectory (new)
+  stepByStepEnabled: boolean;  // User toggle for step-by-step mode
+  stepByStep: StepByStepState;
 }
 
 interface PlanningContextType {
@@ -70,6 +89,11 @@ interface PlanningContextType {
   // Trajectory mode
   setMode: (mode: PlanningMode) => void;
   setTrajectorySteps: (steps: number) => void;
+  setStepByStepEnabled: (enabled: boolean) => void;
+  // Step-by-step trajectory methods
+  startStepByStep: (model: string) => Promise<void>;
+  planNextStep: (currentImageUploadId: string, inputImageDataUrl?: string) => Promise<void>;
+  resetStepByStep: () => void;
 }
 
 const PlanningContext = createContext<PlanningContextType | null>(null);
@@ -158,6 +182,14 @@ async function convertToDataURL(imageRef: string, uploadId: string | null): Prom
   return imageRef;
 }
 
+const DEFAULT_STEP_BY_STEP_STATE: StepByStepState = {
+  status: "idle",
+  currentStepIndex: 0,
+  completedSteps: [],
+  currentStepProgress: null,
+  error: null,
+};
+
 const DEFAULT_STATE: ExtendedPlanningState = {
   ...defaultPlanningState,
   currentImage: null,
@@ -179,6 +211,9 @@ const DEFAULT_STATE: ExtendedPlanningState = {
   trajectorySteps: 5,
   trajectoryProgress: null,
   trajectoryResult: null,
+  // Step-by-step defaults
+  stepByStepEnabled: true,  // Step-by-step mode enabled by default
+  stepByStep: DEFAULT_STEP_BY_STEP_STATE,
 };
 
 export function PlanningProvider({ children }: { children: ReactNode }) {
@@ -254,6 +289,184 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
 
   const setTrajectorySteps = useCallback((trajectorySteps: number) => {
     setPlanningState((prev) => ({ ...prev, trajectorySteps }));
+  }, []);
+
+  const setStepByStepEnabled = useCallback((stepByStepEnabled: boolean) => {
+    setPlanningState((prev) => ({
+      ...prev,
+      stepByStepEnabled,
+      // Reset step-by-step state when toggling
+      stepByStep: DEFAULT_STEP_BY_STEP_STATE,
+    }));
+  }, []);
+
+  // Step-by-step trajectory methods
+  const startStepByStep = useCallback(async (model: string) => {
+    const { goalImage, goalImageUploadId } = planningStateRef.current;
+
+    if (!goalImage) {
+      console.error('[PlanningContext] Cannot start step-by-step: no goal image set');
+      return;
+    }
+
+    // First, ensure goal image is uploaded to backend
+    let uploadId = goalImageUploadId;
+    if (!uploadId && goalImage.startsWith("blob:")) {
+      console.log('[PlanningContext] Uploading goal image for step-by-step mode...');
+      try {
+        const response = await fetchWithTimeout(goalImage, 5000);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch blob: ${response.statusText}`);
+        }
+        const blob = await response.blob();
+        const file = new File([blob], "goal.jpg", { type: blob.type || "image/jpeg" });
+        const uploadResult = await api.uploadImage(file);
+        uploadId = uploadResult.uploadId;
+        console.log('[PlanningContext] Goal image uploaded:', uploadId);
+      } catch (error) {
+        console.error('[PlanningContext] Failed to upload goal image:', error);
+        setPlanningState((prev) => ({
+          ...prev,
+          error: "Failed to upload goal image. Please try again.",
+        }));
+        return;
+      }
+    } else if (goalImage.startsWith("data:")) {
+      // Convert data URL to blob and upload
+      console.log('[PlanningContext] Converting goal data URL to blob for upload...');
+      try {
+        const response = await fetch(goalImage);
+        const blob = await response.blob();
+        const file = new File([blob], "goal.jpg", { type: blob.type || "image/jpeg" });
+        const uploadResult = await api.uploadImage(file);
+        uploadId = uploadResult.uploadId;
+        console.log('[PlanningContext] Goal image uploaded:', uploadId);
+      } catch (error) {
+        console.error('[PlanningContext] Failed to upload goal image:', error);
+        setPlanningState((prev) => ({
+          ...prev,
+          error: "Failed to upload goal image. Please try again.",
+        }));
+        return;
+      }
+    }
+
+    // Initialize step-by-step mode - wait for first image from simulator
+    setPlanningState((prev) => ({
+      ...prev,
+      mode: "trajectory",
+      planningModel: model,
+      goalImageUploadId: uploadId,
+      stepByStep: {
+        status: "waiting_for_image",
+        currentStepIndex: 0,
+        completedSteps: [],
+        currentStepProgress: null,
+        error: null,
+      },
+      // Clear any previous results
+      hasResults: false,
+      trajectoryResult: null,
+      error: null,
+    }));
+    console.log('[PlanningContext] Step-by-step mode started, waiting for first image');
+  }, []);
+
+  const planNextStep = useCallback(async (currentImageUploadId: string, inputImageDataUrl?: string) => {
+    const { goalImageUploadId, planningModel, samples, iterations, trajectorySteps, stepByStep } = planningStateRef.current;
+
+    if (!goalImageUploadId) {
+      setPlanningState((prev) => ({
+        ...prev,
+        stepByStep: { ...prev.stepByStep, error: "Goal image not set", status: "waiting_for_image" },
+      }));
+      return;
+    }
+
+    if (!planningModel) {
+      setPlanningState((prev) => ({
+        ...prev,
+        stepByStep: { ...prev.stepByStep, error: "Model not selected", status: "waiting_for_image" },
+      }));
+      return;
+    }
+
+    const stepIndex = stepByStep.currentStepIndex;
+    console.log(`[PlanningContext] Planning step ${stepIndex} with image ${currentImageUploadId}`);
+
+    // Update state to "planning"
+    setPlanningState((prev) => ({
+      ...prev,
+      isProcessing: true,
+      stepByStep: {
+        ...prev.stepByStep,
+        status: "planning",
+        currentStepProgress: 0,
+        error: null,
+      },
+    }));
+
+    try {
+      // Call the single-step API
+      const response = await api.planTrajectoryStep({
+        currentImage: currentImageUploadId,
+        goalImage: goalImageUploadId,
+        model: planningModel,
+        samples,
+        iterations,
+        stepIndex,
+      });
+
+      if (!response.success || !response.result) {
+        throw new Error(response.error || "Planning step failed");
+      }
+
+      const result = response.result;
+      // Store the input image with the result for display in the UI
+      const resultWithImage: SingleStepResultWithImage = {
+        ...result,
+        inputImageDataUrl,
+      };
+      const newCompletedSteps = [...stepByStep.completedSteps, resultWithImage];
+      const isComplete = newCompletedSteps.length >= trajectorySteps;
+
+      console.log(`[PlanningContext] Step ${stepIndex} completed: action=${result.action}, isComplete=${isComplete}`);
+
+      setPlanningState((prev) => ({
+        ...prev,
+        isProcessing: false,
+        stepByStep: {
+          ...prev.stepByStep,
+          status: isComplete ? "completed" : "waiting_for_image",
+          currentStepIndex: stepIndex + 1,
+          completedSteps: newCompletedSteps,
+          currentStepProgress: null,
+        },
+        hasResults: isComplete,
+      }));
+
+    } catch (error) {
+      console.error('[PlanningContext] Step planning failed:', error);
+      setPlanningState((prev) => ({
+        ...prev,
+        isProcessing: false,
+        stepByStep: {
+          ...prev.stepByStep,
+          status: "waiting_for_image",
+          error: error instanceof Error ? error.message : "Planning failed",
+          currentStepProgress: null,
+        },
+      }));
+    }
+  }, []);
+
+  const resetStepByStep = useCallback(() => {
+    setPlanningState((prev) => ({
+      ...prev,
+      stepByStep: DEFAULT_STEP_BY_STEP_STATE,
+      hasResults: false,
+    }));
+    console.log('[PlanningContext] Step-by-step reset');
   }, []);
 
   const startPlanning = useCallback(async (model: string) => {
@@ -723,6 +936,11 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       goalImageUploadId: planningState.goalImageUploadId,
       setMode,
       setTrajectorySteps,
+      setStepByStepEnabled,
+      // Step-by-step trajectory methods
+      startStepByStep,
+      planNextStep,
+      resetStepByStep,
     }),
     [
       planningState,
@@ -741,6 +959,10 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       estimatedCost,
       setMode,
       setTrajectorySteps,
+      setStepByStepEnabled,
+      startStepByStep,
+      planNextStep,
+      resetStepByStep,
     ]
   );
 

@@ -954,5 +954,137 @@ class PlannerService:
         return result
 
 
+    # =========================================================================
+    # Single-Step Planning (Step-by-Step Mode)
+    # =========================================================================
+
+    async def run_single_step_planning(
+        self,
+        current_image_id: str,
+        goal_image_id: str,
+        model_id: str,
+        samples: int,
+        iterations: int,
+        step_index: int = 0,
+    ) -> dict:
+        """
+        Run a single step of trajectory planning (step-by-step mode).
+
+        This is a simplified version of regular planning that:
+        - Takes a real observation image from the simulator
+        - Plans the optimal action to move toward the goal
+        - Returns immediately without embedding rollout
+
+        The user is responsible for providing updated observations
+        between steps (typically from the simulator).
+
+        Args:
+            current_image_id: Upload ID of current observation from simulator
+            goal_image_id: Upload ID of goal image
+            model_id: Model to use (should be AC model for trajectory)
+            samples: CEM samples per iteration
+            iterations: CEM iterations
+            step_index: Which step this is (for display only)
+
+        Returns:
+            dict with action, energy, confidence, energy_history, is_ac_model
+        """
+        import gc
+        import torch
+        import time
+
+        main_loop = asyncio.get_running_loop()
+        start_time = time.time()
+
+        # Load model if needed
+        from app.services.vjepa2 import get_model_loader
+        loader = get_model_loader()
+
+        if not loader.is_loaded(model_id):
+            # Load the model (blocking)
+            logger.info(f"[SingleStep] Loading model {model_id}...")
+
+        # Load images
+        logger.info(f"[SingleStep] Step {step_index}: Loading images...")
+        current_img = self._load_image_from_upload(current_image_id)
+        goal_img = self._load_image_from_upload(goal_image_id)
+
+        if current_img is None or goal_img is None:
+            error_msg = f"Could not load images. Current: {'loaded' if current_img else 'FAILED'}, Goal: {'loaded' if goal_img else 'FAILED'}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+        # Get inference service
+        inference = await main_loop.run_in_executor(
+            None, lambda: self._get_inference(model_id)
+        )
+
+        if inference is None:
+            raise RuntimeError("V-JEPA2 model not available")
+
+        # Memory cleanup before encoding
+        gc.collect()
+        if inference.device.type == "mps":
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+        elif inference.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        # Track energy history
+        energy_history = []
+
+        def cem_progress(iteration: int, total: int, best_energy: float, best_action):
+            energy_history.append(round(best_energy, 3))
+
+        # Run CEM optimization
+        logger.info(f"[SingleStep] Step {step_index}: Running CEM with {samples} samples, {iterations} iterations...")
+        try:
+            cem_result = await main_loop.run_in_executor(
+                None,
+                lambda: inference.run_cem(
+                    current_image=current_img,
+                    goal_image=goal_img,
+                    num_samples=samples,
+                    num_iterations=iterations,
+                    elite_fraction=0.1,
+                    progress_callback=cem_progress,
+                )
+            )
+        except Exception as e:
+            logger.error(f"[SingleStep] CEM failed: {e}", exc_info=True)
+            raise RuntimeError(f"Planning failed: {str(e)}") from e
+
+        # Cleanup
+        inference.clear_cache(aggressive=True)
+        del current_img
+        del goal_img
+        gc.collect()
+
+        if inference.device.type == "mps":
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+        elif inference.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        elapsed = time.time() - start_time
+        logger.info(
+            f"[SingleStep] Step {step_index} completed in {elapsed:.1f}s: "
+            f"action={cem_result['action']}, energy={cem_result['energy']:.3f}"
+        )
+
+        return {
+            "step_index": step_index,
+            "action": cem_result["action"],
+            "energy": cem_result["energy"],
+            "confidence": cem_result["confidence"],
+            "energy_history": cem_result["energy_history"],
+            "is_ac_model": cem_result.get("is_ac_model", False),
+            "energy_threshold": cem_result.get("energy_threshold", 3.0),
+            "passes_threshold": cem_result.get("passes_threshold", False),
+            # Use normalized_distance (energy/10 capped at 1.0) for consistency
+            "distance_to_goal": cem_result.get("normalized_distance", 0.0),
+        }
+
+
 # Singleton instance
 planner = PlannerService()

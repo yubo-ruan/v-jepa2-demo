@@ -17,15 +17,11 @@ class RoboSuiteSimulator:
     Converts V-JEPA2/DROID action format to RoboSuite OSC_POSE format.
     """
 
-    # Refresh renderer every N steps to prevent OpenGL buffer corruption
-    RENDERER_REFRESH_INTERVAL = 20
-
     def __init__(self):
         """Initialize the simulator wrapper (lazy loads robosuite)."""
         self.env = None
         self.task = None
         self._initialized = False
-        self._step_count = 0
 
     def is_initialized(self) -> bool:
         """Check if the simulator is initialized."""
@@ -72,7 +68,6 @@ class RoboSuiteSimulator:
 
         self.task = task
         self._initialized = True
-        self._step_count = 0
 
         # Reset and get initial observation
         obs = self.env.reset()
@@ -133,7 +128,6 @@ class RoboSuiteSimulator:
 
         # Execute action
         obs, reward, done, info = self.env.step(transformed_action)
-        self._step_count += 1
 
         # Extract only the data we need (observation filtering for memory efficiency)
         # Don't keep reference to full obs dict
@@ -150,10 +144,6 @@ class RoboSuiteSimulator:
         # Clear reference to obs dict
         del obs
 
-        # Periodic renderer refresh to prevent OpenGL buffer corruption
-        if self._step_count >= self.RENDERER_REFRESH_INTERVAL:
-            self._refresh_renderer()
-
         return {
             "success": True,
             "image": image,
@@ -165,36 +155,25 @@ class RoboSuiteSimulator:
             "transformed_action": transformed_action.tolist(),
         }
 
-    def _refresh_renderer(self):
+    def _euler_to_axis_angle(self, roll: float, pitch: float, yaw: float) -> np.ndarray:
         """
-        Refresh the offscreen renderer to prevent OpenGL buffer corruption.
+        Convert Euler angles (roll, pitch, yaw) to axis-angle representation.
 
-        MuJoCo's offscreen renderer can get corrupted after many frames.
-        This saves state, reinitializes the environment, and restores state.
+        Uses scipy's Rotation class for robust, well-tested conversion.
+        The 'xyz' convention means intrinsic rotations: X (roll), Y (pitch), Z (yaw).
+
+        Args:
+            roll: Rotation about X-axis in radians
+            pitch: Rotation about Y-axis in radians
+            yaw: Rotation about Z-axis in radians
+
+        Returns:
+            3D axis-angle vector [ax, ay, az] where magnitude is the rotation angle
         """
-        if self.env is None:
-            return
+        from scipy.spatial.transform import Rotation
 
-        logger.info(f"[RoboSuiteSimulator] Refreshing renderer after {self._step_count} steps")
-
-        # Save current state
-        sim_state = self.env.sim.get_state()
-        rng_state = None
-        if hasattr(self.env, "np_random") and self.env.np_random is not None:
-            rng_state = self.env.np_random.bit_generator.state
-
-        # Reinitialize environment (creates fresh OpenGL context)
-        self.initialize(task=self.task)
-
-        # Restore physics state
-        self.env.sim.set_state(sim_state)
-        self.env.sim.forward()
-
-        # Restore RNG
-        if rng_state is not None and hasattr(self.env, "np_random") and self.env.np_random is not None:
-            self.env.np_random.bit_generator.state = rng_state
-
-        logger.info("[RoboSuiteSimulator] Renderer refreshed successfully")
+        r = Rotation.from_euler('xyz', [roll, pitch, yaw])
+        return r.as_rotvec()  # axis-angle representation
 
     def _transform_action(self, action: np.ndarray) -> np.ndarray:
         """
@@ -203,7 +182,7 @@ class RoboSuiteSimulator:
         V-JEPA2/DROID format (7-DOF):
             [x, y, z, roll, pitch, yaw, gripper]
             - Position deltas in meters
-            - Rotation deltas in radians
+            - Rotation deltas in radians (Euler angles)
             - Gripper: [-1, 1] where -1=open, 1=close
 
         RoboSuite OSC_POSE format (7-DOF):
@@ -220,7 +199,7 @@ class RoboSuiteSimulator:
         """
         # Extract components
         pos_delta = action[:3]  # x, y, z position deltas
-        rot_delta = action[3:6]  # roll, pitch, yaw rotation deltas
+        rot_euler = action[3:6]  # roll, pitch, yaw rotation deltas (Euler angles)
         gripper = action[6]  # gripper command
 
         # Scale position deltas for RoboSuite controller
@@ -228,9 +207,12 @@ class RoboSuiteSimulator:
         pos_scaled = pos_delta * 1.0  # Adjust scale if needed
 
         # Convert Euler angles (roll, pitch, yaw) to axis-angle representation
-        # For small angles, axis-angle ≈ [roll, pitch, yaw]
-        # This is a simplification that works for small rotations
-        rot_axis_angle = rot_delta * 1.0  # Adjust scale if needed
+        # This is the proper conversion for RoboSuite's OSC_POSE controller
+        rot_axis_angle = self._euler_to_axis_angle(
+            roll=rot_euler[0],
+            pitch=rot_euler[1],
+            yaw=rot_euler[2]
+        )
 
         # Normalize gripper to [-1, 1] range
         # V-JEPA2: negative=open, positive=close
@@ -355,7 +337,6 @@ class RoboSuiteSimulator:
             self.env = None
         self._initialized = False
         self.task = None
-        self._step_count = 0
 
         # Aggressive memory cleanup after closing simulator
         # MuJoCo can hold significant memory that needs to be released

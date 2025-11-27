@@ -176,6 +176,34 @@ export interface TrajectoryResult {
   useSimulator: boolean;  // Whether RoboSuite simulator was used
 }
 
+// Single-step trajectory planning (step-by-step mode)
+export interface SingleStepRequest {
+  currentImage: string;  // upload_id from simulator observation
+  goalImage: string;     // upload_id of goal image
+  model?: string;
+  samples?: number;
+  iterations?: number;
+  stepIndex?: number;    // Which step this is (for display)
+}
+
+export interface SingleStepResult {
+  stepIndex: number;
+  action: number[];      // 7D for AC models
+  energy: number;
+  confidence: number;
+  energyHistory: number[];
+  isAcModel: boolean;
+  energyThreshold: number;
+  passesThreshold: boolean;
+  distanceToGoal: number;  // Normalized distance (0-1)
+}
+
+export interface SingleStepResponse {
+  success: boolean;
+  result?: SingleStepResult;
+  error?: string;
+}
+
 export interface ComparisonResult {
   comparisonId: string;
   status: string;
@@ -623,6 +651,26 @@ export const api = {
    */
   getObservationImageUrl(taskId: string, step: number): string {
     return `${API_BASE}/plan/observations/${taskId}/${step}`;
+  },
+
+  /**
+   * Plan a single trajectory step (step-by-step mode).
+   * Uses real observations from simulator instead of embedding rollout.
+   */
+  async planTrajectoryStep(params: SingleStepRequest): Promise<SingleStepResponse> {
+    const body = camelToSnake({
+      currentImage: params.currentImage,
+      goalImage: params.goalImage,
+      model: params.model || "vit-giant-ac",
+      samples: params.samples || 400,
+      iterations: params.iterations || 10,
+      stepIndex: params.stepIndex || 0,
+    });
+
+    return fetchJson<SingleStepResponse>(`${API_BASE}/plan/trajectory/step`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   },
 
   subscribeToTrajectoryProgress(

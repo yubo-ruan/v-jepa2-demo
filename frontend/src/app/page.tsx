@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Header, Sidebar } from "@/components/layout";
 import { UploadPage, HistoryPage, SimulatorPage } from "@/components/pages";
 import { ResearchDashboard, type ResearchTab } from "@/components/research/ResearchDashboard";
 import { Toast } from "@/components/ui";
-import { ToastProvider, ConfigProvider, PlanningProvider, ModelsProvider, HistoryProvider, SimulatorProvider, useToast } from "@/contexts";
+import { ToastProvider, ConfigProvider, PlanningProvider, ModelsProvider, HistoryProvider, SimulatorProvider, useToast, useSimulator } from "@/contexts";
 import type { MainTab } from "@/types";
 
 function MainContent() {
@@ -13,6 +13,12 @@ function MainContent() {
   const [researchTab, setResearchTab] = useState<ResearchTab>("dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const { toast } = useToast();
+  const { setGoToSimulator } = useSimulator();
+
+  // Register the goToSimulator callback so child components can switch tabs
+  useEffect(() => {
+    setGoToSimulator(() => setActiveTab("simulator"));
+  }, [setGoToSimulator]);
 
   return (
     <div className="flex flex-col h-screen">

@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { api } from "@/lib/api";
-import { usePlanning, useSimulator } from "@/contexts";
+import { useSimulator } from "@/contexts";
 
 // Available RoboSuite tasks
 const ROBOSUITE_TASKS = [
@@ -51,12 +51,8 @@ export function SimulatorPage() {
   const [error, setError] = useState<string | null>(null);
   const [stepCount, setStepCount] = useState(0);
 
-  // Get planning result for import action feature
-  const { planningState } = usePlanning();
-  const hasInferenceResult = planningState.result && planningState.result.action.length === 7;
-
   // Sync simulator image with shared context for cross-page access
-  const { setSimulatorImage, setInitialized } = useSimulator();
+  const { simulatorState, setSimulatorImage, setInitialized, setPendingAction } = useSimulator();
 
   // Sync currentImage to shared context whenever it changes
   useEffect(() => {
@@ -68,14 +64,14 @@ export function SimulatorPage() {
     setInitialized(status?.initialized ?? false);
   }, [status?.initialized, setInitialized]);
 
-  // Import action from inference result
-  // The planning result stores raw action values (meters, radians, gripper [-1,1])
-  // which matches the simulator's expected input format
-  const importFromInference = useCallback(() => {
-    if (planningState.result && planningState.result.action.length === 7) {
-      setAction([...planningState.result.action]);
+  // Load pending action from context (set by Simulate button in UploadPage)
+  useEffect(() => {
+    if (simulatorState.pendingAction && simulatorState.pendingAction.length === 7) {
+      setAction([...simulatorState.pendingAction]);
+      // Clear the pending action after loading
+      setPendingAction(null);
     }
-  }, [planningState.result]);
+  }, [simulatorState.pendingAction, setPendingAction]);
 
   // Check simulator status
   const checkStatus = useCallback(async () => {
@@ -454,18 +450,6 @@ export function SimulatorPage() {
                 7-DOF Action Input
               </h2>
               <div className="flex items-center gap-2">
-                <button
-                  onClick={importFromInference}
-                  disabled={!hasInferenceResult}
-                  title={hasInferenceResult ? "Import action from Inference result" : "Run inference first to import action"}
-                  className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-                    hasInferenceResult
-                      ? "bg-indigo-600 hover:bg-indigo-500 text-white"
-                      : "bg-zinc-700 text-zinc-500 cursor-not-allowed"
-                  }`}
-                >
-                  ⬇ Import
-                </button>
                 <button
                   onClick={generateRandomAction}
                   className="px-3 py-1.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-300 hover:text-white text-sm rounded-lg transition-colors"

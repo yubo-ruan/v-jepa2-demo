@@ -171,6 +171,59 @@ class TrajectoryResultResponse(BaseModel):
 
 
 # =============================================================================
+# Single-Step Trajectory Planning Schemas (Step-by-Step Mode)
+# =============================================================================
+
+class SingleStepRequest(BaseModel):
+    """Request for single-step trajectory planning (user provides image each step)."""
+    current_image: str  # base64 or upload_id - real observation from simulator
+    goal_image: str  # base64 or upload_id - target goal image
+    model: str = "vit-giant-ac"
+    samples: int = Field(default=400, ge=50, le=1000)
+    iterations: int = Field(default=10, ge=3, le=20)
+    step_index: int = Field(default=0, ge=0)  # Which step this is (for UI display)
+
+
+class SingleStepProgress(BaseModel):
+    """Progress update during single-step planning."""
+    status: Literal["loading_model", "encoding", "running", "completed"] = "running"
+    model_loading: Optional[str] = None
+    download_progress: Optional[float] = None
+    download_total_gb: Optional[float] = None
+    download_downloaded_gb: Optional[float] = None
+    iteration: int = 0
+    total_iterations: int = 0
+    best_energy: float = 0.0
+    energy_history: List[float] = []
+    samples_evaluated: int = 0
+    elapsed_seconds: float = 0.0
+    eta_seconds: float = 0.0
+    step_index: int = 0
+
+
+class SingleStepResult(BaseModel):
+    """Result of single-step planning - action for this step only."""
+    step_index: int
+    action: List[float]  # 7D for AC models
+    energy: float
+    confidence: float
+    energy_history: List[float] = []
+    is_ac_model: bool = False
+    # Validation fields
+    energy_threshold: float = 3.0
+    passes_threshold: bool = False
+    # Distance to goal (embedding space)
+    distance_to_goal: float = 0.0
+
+
+class SingleStepResponse(BaseModel):
+    """Response for single-step trajectory planning (synchronous)."""
+    success: bool
+    result: Optional[SingleStepResult] = None
+    error: Optional[str] = None
+
+
+# =============================================================================
 # Model Management Schemas
 # =============================================================================
 

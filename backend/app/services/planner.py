@@ -552,15 +552,20 @@ class PlannerService:
         progress_callback: Optional[Callable[[TrajectoryProgress], None]] = None,
     ) -> TrajectoryResult:
         """
-        Run sequential trajectory planning using V-JEPA2.
+        Run sequential trajectory planning using V-JEPA2 with EMBEDDING-SPACE ROLLOUT.
 
-        Approach A: Sequential Planning toward Single Goal
-        - For each step, run CEM to find optimal action from current state to goal
-        - After each action, simulate the state update (using the world model's prediction)
-        - Repeat until we have num_steps actions
+        Key Architecture Change (v2):
+        - Instead of pixel-space rollout (which requires a decoder V-JEPA2 lacks),
+          we use EMBEDDING-SPACE rollout with the AC predictor.
+        - Step 0: Encode images once, get initial embedding distance
+        - For each step: Run CEM from current embedding to goal embedding
+        - After each action: Roll forward embedding using predict_next_embedding()
+        - Track progress via embedding distance reduction
 
-        The key insight: V-JEPA2 AC model takes (current_frame, action) and predicts future frames.
-        We use the predicted frame as the "current" for the next planning step.
+        This properly leverages V-JEPA2-AC's world model capabilities:
+        - AC predictor: (current_embedding, action, state) → predicted_embedding
+        - Energy should DECREASE across steps as we approach the goal
+        - Each step plans from the PREDICTED state, not the original image
         """
         task = self.trajectory_tasks.get(task_id)
         if not task:
@@ -650,9 +655,60 @@ class PlannerService:
             )
             await asyncio.sleep(0.05)
 
-        # Sequential trajectory planning
+        # =======================================================================
+        # EMBEDDING-SPACE ROLLOUT: Encode images ONCE, track embeddings
+        # =======================================================================
+        import torch
+
+        # Step 0: Encode both images and get initial embeddings
+        logger.info("[Trajectory] Encoding images and computing initial distance...")
+
+        def encode_and_get_distance():
+            """Encode images and return embeddings + initial distance."""
+            # Call encode_images directly (not run_cem which clears cache in finally block)
+            # This populates _embedding_cache["current_patches"] and ["goal_patches"] for AC models
+            inference.encode_images(current_img, goal_img)
+
+            # Extract cached embeddings (populated by encode_images for AC models)
+            current_emb = inference._embedding_cache.get("current_patches")
+            goal_emb = inference._embedding_cache.get("goal_patches")
+
+            if current_emb is None or goal_emb is None:
+                raise RuntimeError("Failed to get embeddings from cache")
+
+            # Debug: Check if embeddings are actually different
+            logger.info(f"[Trajectory] DEBUG: current_emb shape={current_emb.shape}, goal_emb shape={goal_emb.shape}")
+            logger.info(f"[Trajectory] DEBUG: current_emb ptr={current_emb.data_ptr()}, goal_emb ptr={goal_emb.data_ptr()}")
+            logger.info(f"[Trajectory] DEBUG: current_emb mean={current_emb.mean().item():.6f}, goal_emb mean={goal_emb.mean().item():.6f}")
+
+            # Clone to new tensors (deep copy to ensure independence)
+            current_emb = current_emb.clone().detach().contiguous()
+            goal_emb = goal_emb.clone().detach().contiguous()
+
+            logger.info(f"[Trajectory] DEBUG: After clone - current ptr={current_emb.data_ptr()}, goal ptr={goal_emb.data_ptr()}")
+
+            # Compute initial distance (L1 mean, same as energy calculation)
+            initial_dist = torch.abs(current_emb - goal_emb).mean().item()
+            logger.info(f"[Trajectory] DEBUG: Computed initial_dist={initial_dist:.6f}")
+
+            return current_emb, goal_emb, initial_dist
+
+        try:
+            current_embedding, goal_embedding, initial_distance = await main_loop.run_in_executor(
+                None, encode_and_get_distance
+            )
+            logger.info(f"[Trajectory] Initial embedding distance: {initial_distance:.4f}")
+        except Exception as e:
+            task.status = "failed"
+            task.error = f"Failed to encode images: {str(e)}"
+            logger.error(task.error, exc_info=True)
+            raise RuntimeError(task.error) from e
+
+        # Track trajectory state in embedding space
+        trajectory_embedding = current_embedding  # Will be rolled forward each step
+
+        # Sequential trajectory planning with embedding rollout
         completed_steps: list[TrajectoryStep] = []
-        current_state_img = current_img  # Start from initial image
 
         for step_idx in range(num_steps):
             if task.cancelled:
@@ -702,17 +758,25 @@ class PlannerService:
                     )
 
             # Run CEM for this step
+            # IMPORTANT: Use run_cem_from_embedding for ALL steps to avoid
+            # run_cem's finally block clearing the cache and invalidating our embeddings
             try:
+                # Capture current values by binding to local variables (avoid closure capture issues)
+                current_emb_for_cem = trajectory_embedding.clone().detach()
+                goal_emb_for_cem = goal_embedding.clone().detach()
+                init_dist_for_cem = initial_distance
+
                 cem_result = await main_loop.run_in_executor(
                     None,
-                    lambda: inference.run_cem(
-                        current_image=current_state_img,
-                        goal_image=goal_img,
-                        num_samples=samples,
-                        num_iterations=iterations,
-                        elite_fraction=0.1,
-                        progress_callback=cem_progress_for_step,
-                    )
+                    lambda curr=current_emb_for_cem, goal=goal_emb_for_cem, dist=init_dist_for_cem:
+                        inference.run_cem_from_embedding(
+                            current_embedding=curr,
+                            goal_embedding=goal,
+                            initial_distance=dist,
+                            num_samples=samples,
+                            num_iterations=iterations,
+                            progress_callback=cem_progress_for_step,
+                        )
                 )
             except asyncio.CancelledError:
                 task.status = "cancelled"
@@ -723,51 +787,81 @@ class PlannerService:
                 logger.error(task.error, exc_info=True)
                 raise RuntimeError(task.error) from e
 
-            # Record this step
+            # Roll forward embedding using the action found by CEM
+            # This predicts what embedding we would reach AFTER taking this action
+            try:
+                # Capture current values to avoid closure issues
+                emb_to_roll = trajectory_embedding.clone().detach()
+                action_to_apply = cem_result["action"]
+
+                def predict_next(emb, action):
+                    return inference.predict_next_embedding(
+                        current_embedding=emb,
+                        action=action,
+                    )
+
+                # Roll forward to get predicted next embedding
+                trajectory_embedding = await main_loop.run_in_executor(
+                    None,
+                    lambda e=emb_to_roll, a=action_to_apply: predict_next(e, a)
+                )
+                logger.info(f"[Trajectory] Rolled forward embedding for step {step_idx + 1}")
+
+            except Exception as e:
+                logger.warning(f"[Trajectory] Failed to predict next embedding: {e}")
+                # Continue with current embedding - trajectory will be less accurate
+                # but still valid (graceful degradation)
+
+            # Now compute distance to goal AFTER rolling forward
+            # This shows how close we got after taking this action
+            def compute_distance(curr_emb, goal_emb):
+                return torch.abs(curr_emb - goal_emb).mean().item()
+
+            # Capture embeddings for lambda
+            curr_emb_for_dist = trajectory_embedding.clone().detach()
+            goal_emb_for_dist = goal_embedding.clone().detach()
+
+            current_distance = await main_loop.run_in_executor(
+                None, lambda c=curr_emb_for_dist, g=goal_emb_for_dist: compute_distance(c, g)
+            )
+
+            # Calculate progress ratio (0 = no progress, 1 = reached goal)
+            if initial_distance > 0.01:
+                progress_ratio = max(0.0, 1.0 - (current_distance / initial_distance))
+            else:
+                progress_ratio = 1.0  # Already at goal
+
+            # Record this step with progress tracking
             step_result = TrajectoryStep(
                 step=step_idx,
                 action=cem_result["action"],
                 energy=cem_result["energy"],
                 confidence=cem_result["confidence"],
                 energy_history=cem_result["energy_history"],
+                distance_to_goal=round(current_distance, 4),
+                progress_ratio=round(progress_ratio, 4),
             )
             completed_steps.append(step_result)
 
-            logger.info(f"[Trajectory] Step {step_idx + 1} complete: action={step_result.action}, energy={step_result.energy:.3f}")
-
-            # Simulate state update for next step using the world model
-            # The AC model predicts the next frame given (current_frame, action)
-            if step_idx < num_steps - 1:  # Don't need prediction after last step
-                try:
-                    # Use the inference service to predict the next state
-                    predicted_img = await main_loop.run_in_executor(
-                        None,
-                        lambda action=cem_result["action"]: inference.predict_next_frame(
-                            current_image=current_state_img,
-                            action=action,
-                        )
-                    )
-
-                    if predicted_img is not None:
-                        # Use predicted image as next state
-                        current_state_img = predicted_img
-                        logger.info(f"[Trajectory] Using predicted frame for next step")
-                    else:
-                        # Fallback: keep using current image (less accurate but works)
-                        logger.warning(f"[Trajectory] Could not predict next frame, continuing with current")
-
-                except Exception as e:
-                    logger.warning(f"[Trajectory] Failed to predict next frame: {e}, continuing with current")
-                    # Continue with current image - trajectory will be less accurate but still valid
+            logger.info(
+                f"[Trajectory] Step {step_idx + 1} complete: "
+                f"action={step_result.action}, energy={step_result.energy:.3f}, "
+                f"distance={current_distance:.4f}, progress={progress_ratio*100:.1f}%"
+            )
 
             # Clear cache between steps to prevent memory buildup
             inference.clear_cache(aggressive=False)
 
+        # Compute final distance after all steps
+        # Capture embeddings to avoid closure issues
+        final_traj_emb = trajectory_embedding.clone().detach()
+        final_goal_emb = goal_embedding.clone().detach()
+        final_distance = await main_loop.run_in_executor(
+            None, lambda t=final_traj_emb, g=final_goal_emb: torch.abs(t - g).mean().item()
+        )
+
         # Final cleanup
         inference.clear_cache(aggressive=True)
-        # Clean up image references (current_state_img may have been updated during trajectory)
-        if current_state_img is not current_img:
-            del current_state_img
         del current_img
         del goal_img
 
@@ -776,22 +870,47 @@ class PlannerService:
         avg_energy = total_energy / len(completed_steps) if completed_steps else 0
         avg_confidence = sum(s.confidence for s in completed_steps) / len(completed_steps) if completed_steps else 0
 
+        # Calculate total progress and energy trend
+        total_progress = 1.0 - (final_distance / initial_distance) if initial_distance > 0.01 else 1.0
+
+        # Determine energy trend based on overall progress
+        # If we're making progress toward the goal (distance decreasing), that's what matters
+        if len(completed_steps) >= 2:
+            # Compare initial distance to final distance for trend
+            # This reflects whether we're actually approaching the goal
+            if final_distance < initial_distance * 0.95:  # Made at least 5% progress
+                energy_trend = "decreasing"
+            elif final_distance > initial_distance * 1.05:  # Got further away
+                energy_trend = "increasing"
+            else:
+                energy_trend = "stable"  # Within 5% of initial
+        else:
+            energy_trend = "unknown"
+
         result = TrajectoryResult(
             steps=completed_steps,
             total_energy=round(total_energy, 3),
             avg_energy=round(avg_energy, 3),
             avg_confidence=round(avg_confidence, 3),
             is_ac_model=cem_result.get("is_ac_model", False) if completed_steps else False,
+            # Progress tracking metrics
+            initial_distance=round(initial_distance, 4),
+            final_distance=round(final_distance, 4),
+            total_progress=round(total_progress, 4),
+            energy_trend=energy_trend,
         )
 
         task.result = result
         task.status = "completed"
 
-        logger.info(f"[Trajectory] Planning completed: {len(completed_steps)} steps, avg_energy={avg_energy:.3f}")
+        logger.info(
+            f"[Trajectory] Planning completed: {len(completed_steps)} steps, "
+            f"avg_energy={avg_energy:.3f}, progress={total_progress*100:.1f}%, "
+            f"energy_trend={energy_trend}"
+        )
 
         # Memory cleanup
         import gc
-        import torch
 
         gc.collect()
         if inference.device.type == "mps":

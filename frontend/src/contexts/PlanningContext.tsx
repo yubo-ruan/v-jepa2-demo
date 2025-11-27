@@ -175,7 +175,7 @@ const DEFAULT_STATE: ExtendedPlanningState = {
   previousCurrentImage: null,
   previousGoalImage: null,
   // Trajectory defaults
-  mode: "single",
+  mode: "trajectory",
   trajectorySteps: 5,
   trajectoryProgress: null,
   trajectoryResult: null,
@@ -272,6 +272,7 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
     }
 
     // Reset state and start processing
+    // Clear BOTH single action and trajectory results to prevent stale data
     setPlanningState((prev) => ({
       ...prev,
       isProcessing: true,
@@ -282,6 +283,9 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       error: null,
       planningStartTime: Date.now(),
       planningModel: model,
+      // Clear trajectory data when starting new planning
+      trajectoryProgress: null,
+      trajectoryResult: null,
     }));
 
     try {
@@ -631,7 +635,7 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
   }, [addExperiment]);
 
   const cancelPlanning = useCallback(async () => {
-    const { taskId } = planningState;
+    const { taskId, mode } = planningState;
 
     // Cancel via WebSocket if connected
     if (wsRef.current) {
@@ -640,17 +644,21 @@ export function PlanningProvider({ children }: { children: ReactNode }) {
       wsRef.current = null;
     }
 
-    // Also cancel via API
+    // Also cancel via API (use correct endpoint based on mode)
     if (taskId) {
       try {
-        await api.cancelPlanning(taskId);
+        if (mode === "trajectory") {
+          await api.cancelTrajectory(taskId);
+        } else {
+          await api.cancelPlanning(taskId);
+        }
       } catch {
         // Ignore errors - task might already be done
       }
     }
 
     setPlanningState((prev) => ({ ...prev, isProcessing: false }));
-  }, [planningState.taskId]);
+  }, [planningState.taskId, planningState.mode]);
 
   const completePlanning = useCallback(() => {
     // For demo mode - manually trigger completion with mock data

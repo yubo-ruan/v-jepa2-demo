@@ -77,6 +77,8 @@ cd frontend
 npm install
 ```
 
+> Note: Large model checkpoints under `data/models/checkpoints/` are ignored by git. Keep any downloaded or trained weights there to avoid committing them.
+
 3. **Install backend dependencies**
 ```bash
 cd ../backend

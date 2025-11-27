@@ -11,6 +11,7 @@ import threading
 import json
 import hashlib
 import shutil
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict, Any, Callable
 from pathlib import Path
@@ -794,24 +795,19 @@ class VJEPA2Inference:
         self._max_embedding_cache_size = 10  # Embeddings are larger
 
     def _get_image_hash(self, image: Image.Image) -> str:
-        """Generate a fast hash for image content to use as cache key."""
+        """Generate a robust hash for image content to use as cache key."""
         import hashlib
-        # Optimized for M4: use image dimensions + corner pixels instead of full bytes
-        # This is 10x faster and sufficient for cache key uniqueness
-        h, w = image.size
+        # Use downsampled image bytes for reliable uniqueness
+        # This prevents hash collisions that cause current/goal images to share tensors
+        w, h = image.size
         try:
-            # Sample corner pixels for hash (fast and unique enough)
-            corners = [
-                image.getpixel((0, 0)),
-                image.getpixel((w-1, 0)),
-                image.getpixel((0, h-1)),
-                image.getpixel((w-1, h-1)),
-                image.getpixel((w//2, h//2)),
-            ]
-            sample = f"{h}x{w}_{corners}".encode()
-        except:
-            # Fallback to size only if getpixel fails
-            sample = f"{h}x{w}".encode()
+            # Downsample to 32x32 and use all pixels for hash
+            # This is fast enough (~1ms) and guarantees uniqueness for different images
+            small = image.resize((32, 32), Image.NEAREST).convert("RGB")
+            sample = small.tobytes()
+        except Exception:
+            # Fallback to full image bytes if resize fails
+            sample = image.tobytes()
 
         # Use blake2b (faster than MD5 on modern CPUs like M4)
         return hashlib.blake2b(sample, digest_size=16).hexdigest()
@@ -989,6 +985,12 @@ class VJEPA2Inference:
             with autocast(device_type=self.device.type, enabled=(self.device.type == 'mps')):
                 current_emb = encoder(current_video)  # (1, num_patches, embed_dim)
                 goal_emb = encoder(goal_video)  # (1, num_patches, embed_dim)
+
+            # DEBUG: Check if encoder returns different tensors
+            logger.info(f"[encode_images] current_emb ptr={current_emb.data_ptr()}, goal_emb ptr={goal_emb.data_ptr()}")
+            logger.info(f"[encode_images] current_emb mean={current_emb.mean().item():.6f}, goal_emb mean={goal_emb.mean().item():.6f}")
+            raw_dist = torch.abs(current_emb - goal_emb).mean().item()
+            logger.info(f"[encode_images] Raw L1 distance between embeddings: {raw_dist:.6f}")
 
             # Store full embeddings for predictor use
             self._embedding_cache["current_patches"] = current_emb
@@ -1536,6 +1538,200 @@ class VJEPA2Inference:
         # Return None to signal caller to keep using current image
         # The trajectory planner handles this gracefully
         return None
+
+    @torch.inference_mode()
+    def predict_next_embedding(
+        self,
+        current_embedding: torch.Tensor,
+        action: List[float],
+    ) -> torch.Tensor:
+        """
+        Predict next state embedding using the AC predictor.
+
+        This is the core of embedding-space rollout for trajectory planning.
+        V-JEPA2-AC was trained with 2-step rollout loss, so it handles
+        error accumulation well.
+
+        Args:
+            current_embedding: Current state embedding of shape (1, num_patches, embed_dim)
+            action: Action to apply [x, y, z, roll, pitch, yaw, gripper] (7D)
+
+        Returns:
+            Predicted embedding of shape (1, num_patches, embed_dim)
+
+        Raises:
+            RuntimeError: If no AC predictor is loaded
+        """
+        predictor = self.loader.get_predictor()
+        if predictor is None:
+            raise RuntimeError("AC model required for embedding rollout - no predictor loaded")
+
+        # Convert action to tensor: (7,) -> (1, 1, 7)
+        action_np = np.array(action, dtype=np.float32)
+        if len(action_np) == 3:
+            # Pad 3D action to 7D (legacy support)
+            action_np = np.concatenate([action_np, np.zeros(4, dtype=np.float32)])
+        elif len(action_np) != 7:
+            # Pad or truncate to 7D
+            padded = np.zeros(7, dtype=np.float32)
+            padded[:min(len(action_np), 7)] = action_np[:7]
+            action_np = padded
+
+        actions_t = torch.from_numpy(action_np).to(device=self.device, dtype=self.dtype)
+        actions_expanded = actions_t.unsqueeze(0).unsqueeze(0)  # (1, 1, 7)
+
+        # Zero states (proprioceptive state - not used in planning)
+        states = torch.zeros(1, 1, self.ACTION_DIM_AC, device=self.device, dtype=self.dtype)
+
+        # Run predictor to get predicted future embedding
+        with autocast(device_type=self.device.type, enabled=(self.device.type == 'mps')):
+            predicted = predictor(current_embedding, actions_expanded, states)
+
+        return predicted  # (1, num_patches, embed_dim)
+
+    @torch.inference_mode()
+    def run_cem_from_embedding(
+        self,
+        current_embedding: torch.Tensor,
+        goal_embedding: torch.Tensor,
+        initial_distance: float,
+        num_samples: int = 100,
+        num_iterations: int = 10,
+        progress_callback: Optional[Callable[[int, int, float, np.ndarray], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run CEM optimization from embeddings (no image encoding needed).
+
+        This is used for trajectory steps 2+ where we have predicted embeddings
+        from the previous step. Avoids expensive image re-encoding.
+
+        Args:
+            current_embedding: Current state embedding (1, num_patches, embed_dim)
+            goal_embedding: Goal state embedding (1, num_patches, embed_dim)
+            initial_distance: Distance from initial state to goal (for progress tracking)
+            num_samples: Number of action samples per iteration
+            num_iterations: Number of CEM iterations
+            progress_callback: Optional callback(iteration, total, best_energy, best_action)
+
+        Returns:
+            Dictionary with action, confidence, energy, and progress metrics
+        """
+        start_time = time.time()
+
+        # Store embeddings in cache for evaluate_actions_ac to use
+        self._embedding_cache["current_patches"] = current_embedding
+        self._embedding_cache["goal_patches"] = goal_embedding
+
+        # Use AC model settings (this method is only for AC models)
+        action_dim = self.ACTION_DIM_AC
+        action_low = np.array([self.ACTION_LOW_AC] * 6 + [self.GRIPPER_LOW])
+        action_high = np.array([self.ACTION_HIGH_AC] * 6 + [self.GRIPPER_HIGH])
+        action_range = action_high - action_low
+
+        # Initialize action distribution with zeros (AC models use small deltas)
+        action_mean = np.zeros(action_dim, dtype=np.float32)
+        action_std = (action_range / 4).astype(np.float32)
+
+        # Pre-allocate arrays for CEM iterations
+        energy_history = []
+        best_action = np.zeros(action_dim, dtype=np.float32)
+        best_energy = float('inf')
+
+        # Early convergence detection
+        convergence_threshold = 0.01
+        convergence_window = 3
+
+        for iteration in range(num_iterations):
+            # Adaptive elite fraction
+            progress = iteration / max(1, num_iterations - 1)
+            current_elite_fraction = 0.20 * (1 - progress) + 0.05 * progress
+            num_elite = max(1, int(num_samples * current_elite_fraction))
+
+            # Sample actions
+            actions = np.random.normal(
+                loc=action_mean,
+                scale=action_std,
+                size=(num_samples, action_dim)
+            )
+            np.clip(actions, action_low, action_high, out=actions)
+
+            # Evaluate using AC predictor
+            energies = self.evaluate_actions_ac(actions)
+
+            # Select elite samples
+            elite_indices = np.argpartition(energies, num_elite)[:num_elite]
+            sorted_elite_idx = elite_indices[np.argsort(energies[elite_indices])]
+            elite_actions = actions[sorted_elite_idx]
+            elite_energies = energies[sorted_elite_idx]
+
+            # Update distribution
+            np.mean(elite_actions, axis=0, out=action_mean)
+            np.std(elite_actions, axis=0, out=action_std)
+            action_std += 1e-6
+
+            # Track best
+            if elite_energies[0] < best_energy:
+                best_energy = elite_energies[0]
+                best_action = elite_actions[0]
+
+            energy_history.append(round(float(best_energy), 3))
+
+            # Early convergence check
+            if iteration >= convergence_window:
+                recent_energies = energy_history[-convergence_window:]
+                energy_improvement = (recent_energies[0] - recent_energies[-1]) / (recent_energies[0] + 1e-6)
+                if energy_improvement < convergence_threshold:
+                    if progress_callback:
+                        progress_callback(iteration + 1, num_iterations, best_energy, best_action)
+                    break
+
+            if progress_callback:
+                progress_callback(iteration + 1, num_iterations, best_energy, best_action)
+
+        elapsed = time.time() - start_time
+
+        # Compute confidence with exponential scaling (no saturation)
+        final_std = action_std.mean()
+        cem_initial_energy = energy_history[0] if energy_history else best_energy
+        energy_reduction = max(0, cem_initial_energy - best_energy)
+
+        # Exponential energy confidence (never floors to 0)
+        energy_scale = 7.0
+        energy_confidence = math.exp(-best_energy / energy_scale)
+
+        # Progress-based confidence (how much closer to goal vs initial distance)
+        current_distance = best_energy / 10.0  # Denormalize
+        progress_confidence = max(0, 1.0 - current_distance / initial_distance) if initial_distance > 0.1 else 0.5
+
+        # Convergence bonus
+        convergence_bonus = min(0.15, energy_reduction / 5.0)
+
+        # Stability confidence
+        stability_confidence = math.exp(-final_std * 0.3)
+
+        # Combined confidence
+        confidence = min(0.98, max(0.05,
+            0.35 * energy_confidence +
+            0.35 * progress_confidence +
+            0.15 * convergence_bonus +
+            0.15 * stability_confidence
+        ))
+
+        # Compute progress ratio
+        progress_ratio = 1.0 - (current_distance / initial_distance) if initial_distance > 0.1 else 0.0
+
+        return {
+            "action": [round(float(x), 4) for x in best_action],
+            "confidence": round(confidence, 3),
+            "energy": round(float(best_energy), 3),
+            "energy_history": energy_history,
+            "final_std": [round(float(x), 4) for x in action_std],
+            "inference_time_ms": round(elapsed * 1000, 1),
+            "samples_evaluated": num_samples * len(energy_history),
+            "is_ac_model": True,
+            "distance_to_goal": round(current_distance, 4),
+            "progress_ratio": round(progress_ratio, 4),
+        }
 
 
 # Global instances

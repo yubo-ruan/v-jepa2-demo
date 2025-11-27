@@ -275,11 +275,20 @@ export function TrajectoryTimeline({ progress, result, isProcessing }: Trajector
                     </div>
                   </div>
 
-                  {/* Right side: Energy, Confidence, Expand button */}
+                  {/* Right side: Progress, Energy, Distance, Confidence, Expand button */}
                   {step && (
                     <div className="flex items-center gap-3">
                       <div className="flex items-center gap-2 text-xs">
+                        {/* Progress indicator */}
+                        <span className={`font-mono ${
+                          step.progressRatio > 0.5 ? "text-emerald-400" :
+                          step.progressRatio > 0.2 ? "text-yellow-400" : "text-zinc-400"
+                        }`}>
+                          {(step.progressRatio * 100).toFixed(0)}%
+                        </span>
                         <span className="text-amber-400 font-mono">E:{step.energy.toFixed(2)}</span>
+                        {/* Embedding distance to goal */}
+                        <span className="text-cyan-400 font-mono">D:{step.distanceToGoal.toFixed(3)}</span>
                         <span className="text-green-400 font-mono">{(step.confidence * 100).toFixed(0)}%</span>
                       </div>
                       <ChevronIcon expanded={isExpanded} className="w-4 h-4 text-zinc-500" />
@@ -369,6 +378,29 @@ export function TrajectoryTimeline({ progress, result, isProcessing }: Trajector
                         </div>
                       )}
 
+                      {/* Progress to Goal bar */}
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs text-zinc-500 w-20">Progress</span>
+                        <div className="flex-1 h-2 bg-zinc-700 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              step.progressRatio > 0.5
+                                ? "bg-gradient-to-r from-emerald-600 to-emerald-400"
+                                : step.progressRatio > 0.2
+                                  ? "bg-gradient-to-r from-yellow-600 to-yellow-400"
+                                  : "bg-gradient-to-r from-zinc-600 to-zinc-500"
+                            }`}
+                            style={{ width: `${step.progressRatio * 100}%` }}
+                          />
+                        </div>
+                        <span className={`text-xs font-mono w-12 text-right ${
+                          step.progressRatio > 0.5 ? "text-emerald-400" :
+                          step.progressRatio > 0.2 ? "text-yellow-400" : "text-zinc-400"
+                        }`}>
+                          {(step.progressRatio * 100).toFixed(1)}%
+                        </span>
+                      </div>
+
                       {/* Confidence bar */}
                       <div className="flex items-center gap-3">
                         <span className="text-xs text-zinc-500 w-20">Confidence</span>
@@ -380,6 +412,14 @@ export function TrajectoryTimeline({ progress, result, isProcessing }: Trajector
                         </div>
                         <span className="text-xs text-green-400 font-mono w-12 text-right">
                           {(step.confidence * 100).toFixed(1)}%
+                        </span>
+                      </div>
+
+                      {/* Distance to Goal */}
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs text-zinc-500 w-20">Distance</span>
+                        <span className="text-xs text-cyan-400 font-mono">
+                          {step.distanceToGoal.toFixed(4)} (embedding)
                         </span>
                       </div>
 
@@ -417,7 +457,7 @@ export function TrajectoryTimeline({ progress, result, isProcessing }: Trajector
       {/* Summary when complete */}
       {isComplete && result && (
         <div className="mt-5 p-4 bg-gradient-to-r from-green-500/10 to-emerald-500/10 rounded-lg border border-green-500/20">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <CheckCircleIcon className="w-5 h-5 text-green-400" />
               <span className="text-sm font-medium text-green-400">Trajectory Complete</span>
@@ -428,12 +468,53 @@ export function TrajectoryTimeline({ progress, result, isProcessing }: Trajector
                 <span className="ml-1 text-zinc-200 font-medium">{result.steps.length}</span>
               </div>
               <div>
-                <span className="text-zinc-500">Total E:</span>
-                <span className="ml-1 text-amber-400 font-medium">{result.totalEnergy.toFixed(2)}</span>
-              </div>
-              <div>
                 <span className="text-zinc-500">Model:</span>
                 <span className="ml-1 text-purple-400 font-medium">{result.isAcModel ? "AC" : "Std"}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Progress metrics row */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            {/* Total Progress */}
+            <div className="bg-zinc-800/50 rounded-lg p-2">
+              <div className="text-xs text-zinc-500 mb-1">Total Progress</div>
+              <div className={`text-lg font-bold ${
+                result.totalProgress > 0.5 ? "text-emerald-400" :
+                result.totalProgress > 0.2 ? "text-yellow-400" : "text-zinc-400"
+              }`}>
+                {(result.totalProgress * 100).toFixed(1)}%
+              </div>
+            </div>
+
+            {/* Energy Trend */}
+            <div className="bg-zinc-800/50 rounded-lg p-2">
+              <div className="text-xs text-zinc-500 mb-1">Energy Trend</div>
+              <div className={`text-sm font-semibold flex items-center gap-1 ${
+                result.energyTrend === "decreasing" ? "text-emerald-400" :
+                result.energyTrend === "stable" ? "text-yellow-400" :
+                result.energyTrend === "increasing" ? "text-red-400" : "text-zinc-400"
+              }`}>
+                {result.energyTrend === "decreasing" && "↓ "}
+                {result.energyTrend === "increasing" && "↑ "}
+                {result.energyTrend === "stable" && "→ "}
+                {result.energyTrend.charAt(0).toUpperCase() + result.energyTrend.slice(1)}
+              </div>
+            </div>
+
+            {/* Distance Reduction */}
+            <div className="bg-zinc-800/50 rounded-lg p-2">
+              <div className="text-xs text-zinc-500 mb-1">Distance</div>
+              <div className="text-xs font-mono text-cyan-400">
+                {result.initialDistance.toFixed(3)} → {result.finalDistance.toFixed(3)}
+              </div>
+            </div>
+
+            {/* Average Energy */}
+            <div className="bg-zinc-800/50 rounded-lg p-2">
+              <div className="text-xs text-zinc-500 mb-1">Avg Energy</div>
+              <div className="text-lg font-bold text-amber-400">
+                {result.avgEnergy.toFixed(2)}
               </div>
             </div>
           </div>

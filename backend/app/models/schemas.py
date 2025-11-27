@@ -100,6 +100,9 @@ class TrajectoryStep(BaseModel):
     energy: float
     confidence: float
     energy_history: List[float] = []  # CEM convergence for this step
+    # Progress tracking fields (embedding-space rollout)
+    distance_to_goal: float = 0.0  # Embedding distance to goal at this step
+    progress_ratio: float = 0.0  # 0-1, how much closer to goal vs initial
 
 
 class TrajectoryRequest(BaseModel):
@@ -144,6 +147,11 @@ class TrajectoryResult(BaseModel):
     avg_energy: float  # Average energy per step
     avg_confidence: float  # Average confidence per step
     is_ac_model: bool = False
+    # Progress tracking metrics (embedding-space rollout)
+    initial_distance: float = 0.0  # Embedding distance from start to goal
+    final_distance: float = 0.0  # Embedding distance after all steps
+    total_progress: float = 0.0  # 1 - final/initial (overall improvement)
+    energy_trend: str = "unknown"  # "decreasing", "stable", "increasing"
 
 
 class TrajectoryTaskResponse(BaseModel):

@@ -4,3 +4,4 @@
 // export { EnergyLandscape3D } from "./EnergyLandscape3D";
 export { IterationReplay } from "./IterationReplay";
 export { TrajectoryTimeline } from "./TrajectoryTimeline";
+export { EmbeddedSimulator } from "./EmbeddedSimulator";

@@ -167,13 +167,34 @@ export function UploadPage() {
     }
   }, [result?.action, setPendingAction, goToSimulator]);
 
-  // Handle simulate action from trajectory timeline (step-by-step mode)
-  const handleSimulateStepAction = useCallback((action: number[]) => {
-    if (action && action.length === 7) {
-      setPendingAction(action);
-      goToSimulator();
+  // Handle continue with image from embedded simulator in step-by-step mode
+  // This is called when the user executes an action in the embedded simulator and clicks Continue
+  const handleContinueWithImage = useCallback(async (imageBase64: string) => {
+    try {
+      // Convert base64 to blob for upload
+      const byteCharacters = atob(imageBase64);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "image/jpeg" });
+      const file = new File([blob], "simulator-observation.jpg", { type: "image/jpeg" });
+
+      // Create data URL for display in the timeline
+      const inputImageDataUrl = `data:image/jpeg;base64,${imageBase64}`;
+
+      // Upload the image
+      showToast("Uploading observation for next step...", "info");
+      const uploadResult = await api.uploadImage(file);
+
+      // Plan the next step with the uploaded image and its data URL for display
+      await planNextStep(uploadResult.uploadId, inputImageDataUrl);
+    } catch (error) {
+      console.error("Failed to continue with simulator image:", error);
+      showToast(`Failed to continue: ${error instanceof Error ? error.message : "Unknown error"}`, "error");
     }
-  }, [setPendingAction, goToSimulator]);
+  }, [planNextStep, showToast]);
 
   const [showDetailsModal, setShowDetailsModal] = useState(false);
 
@@ -956,7 +977,7 @@ export function UploadPage() {
             isSimulatorInitialized={simulatorState.isInitialized}
             isInitializingSimulator={isInitializingSimulator}
             onImportFromSimulator={handleImportFromSimulatorForStepByStep}
-            onSimulateAction={handleSimulateStepAction}
+            onContinueWithImage={handleContinueWithImage}
           />
         </div>
       )}

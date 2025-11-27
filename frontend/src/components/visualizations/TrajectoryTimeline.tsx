@@ -4,6 +4,7 @@ import { useMemo, useState, useEffect } from "react";
 import { CheckCircleIcon, ClockIcon } from "@/components/icons";
 import { ACTION_LABELS, ACTION_DISPLAY_SCALING } from "@/constants/actionDisplay";
 import type { TrajectoryStep, TrajectoryProgress, TrajectoryResult, SingleStepResult } from "@/lib/api";
+import { EmbeddedSimulator } from "./EmbeddedSimulator";
 
 // Step-by-step state types (matching PlanningContext)
 type StepByStepStatus = "idle" | "waiting_for_image" | "planning" | "completed";
@@ -31,7 +32,7 @@ interface TrajectoryTimelineProps {
   isSimulatorInitialized?: boolean;
   isInitializingSimulator?: boolean;  // True when auto-initializing simulator
   onImportFromSimulator?: () => void;
-  onSimulateAction?: (action: number[]) => void;  // Send action to simulator
+  onContinueWithImage?: (imageBase64: string) => void;  // Continue with simulator result image
 }
 
 // Copy icon component
@@ -85,7 +86,7 @@ export function TrajectoryTimeline({
   isSimulatorInitialized = false,
   isInitializingSimulator = false,
   onImportFromSimulator,
-  onSimulateAction,
+  onContinueWithImage,
 }: TrajectoryTimelineProps) {
   // Determine if we're in step-by-step mode
   const isStepByStepMode = stepByStepState && stepByStepState.status !== "idle";
@@ -285,10 +286,13 @@ export function TrajectoryTimeline({
               </div>
               <div>
                 <p className="text-sm font-medium text-blue-300">
-                  Waiting for Step {currentStep + 1} Image
+                  {steps.length === 0 ? "Ready to Start" : `Execute Step ${steps.length} Action`}
                 </p>
                 <p className="text-xs text-zinc-400">
-                  Import the current observation from the simulator
+                  {steps.length === 0
+                    ? "Initialize the simulator to begin planning"
+                    : "Execute the planned action in the simulator, then continue"
+                  }
                 </p>
               </div>
             </div>
@@ -297,8 +301,8 @@ export function TrajectoryTimeline({
             </div>
           </div>
 
-          {/* Import button - always shown when callback is provided (auto-initializes if needed) */}
-          {onImportFromSimulator ? (
+          {/* First step: Show Import button to get initial image */}
+          {steps.length === 0 && onImportFromSimulator && (
             <button
               onClick={onImportFromSimulator}
               disabled={isInitializingSimulator}
@@ -323,7 +327,20 @@ export function TrajectoryTimeline({
                 </>
               )}
             </button>
-          ) : (
+          )}
+
+          {/* Subsequent steps: Show embedded simulator with the last action */}
+          {steps.length > 0 && (
+            <EmbeddedSimulator
+              pendingAction={steps[steps.length - 1].action}
+              onContinue={onContinueWithImage}
+              continueDisabled={false}
+              continueLabel={`Continue to Step ${currentStep + 1}`}
+            />
+          )}
+
+          {/* No callback configured fallback */}
+          {steps.length === 0 && !onImportFromSimulator && (
             <div className="w-full px-4 py-3 bg-zinc-700/50 text-zinc-400 text-center text-sm rounded-lg border border-zinc-600">
               No simulator callback configured
             </div>
@@ -584,18 +601,6 @@ export function TrajectoryTimeline({
                                 >
                                   <CopyIcon className="w-3 h-3" />
                                   {copiedStep === index ? "Copied!" : "Copy"}
-                                </button>
-                              )}
-                              {isStepByStepMode && onSimulateAction && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onSimulateAction(step.action);
-                                  }}
-                                  className="flex items-center gap-1.5 px-3 py-1 text-xs text-white bg-emerald-600 hover:bg-emerald-500 rounded transition-colors"
-                                >
-                                  <RocketIcon className="w-3 h-3" />
-                                  Simulate
                                 </button>
                               )}
                             </div>

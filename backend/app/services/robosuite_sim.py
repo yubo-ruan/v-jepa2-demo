@@ -155,6 +155,133 @@ class RoboSuiteSimulator:
             "transformed_action": transformed_action.tolist(),
         }
 
+    def execute_action_batch(self, action: List[float], num_steps: int = 50) -> Dict[str, Any]:
+        """
+        Execute the same action for multiple steps, returning only the final observation.
+
+        This implementation keeps camera observations enabled to avoid OpenGL context
+        corruption that occurs when toggling use_camera_obs on/off. The overhead is
+        minimal since we don't process the intermediate images.
+
+        Args:
+            action: 7-DOF action in V-JEPA2/DROID format
+            num_steps: Number of simulation steps to execute (default: 50)
+
+        Returns:
+            Dictionary with final state after all steps
+        """
+        import gc
+
+        if not self._initialized or self.env is None:
+            raise RuntimeError("Simulator not initialized")
+
+        # Convert action to numpy
+        raw_action = list(action)
+        action_np = np.array(action, dtype=np.float32)
+
+        # Transform V-JEPA2/DROID action to RoboSuite OSC_POSE format
+        transformed_action = self._transform_action(action_np)
+
+        logger.info(f"[RoboSuiteSimulator] Executing {num_steps} steps with action: {raw_action[:3]}...")
+
+        total_reward = 0.0
+        done = False
+        steps_executed = 0
+        final_obs = None
+
+        # Execute physics steps - keep camera observations enabled to avoid OpenGL corruption
+        # Simply discard intermediate observations to minimize memory usage
+        for i in range(num_steps):
+            obs, reward, done, info = self.env.step(transformed_action)
+            total_reward += reward
+            steps_executed = i + 1
+
+            # Keep only the final observation
+            if i == num_steps - 1 or done:
+                final_obs = obs
+            else:
+                # Discard intermediate observations
+                del obs
+
+            if done:
+                logger.info(f"[RoboSuiteSimulator] Episode ended after {steps_executed} steps")
+                break
+
+            # Periodic garbage collection to prevent memory buildup
+            if i > 0 and i % 25 == 0:
+                gc.collect()
+
+        # Extract data from final observation
+        robot_state = final_obs.get('robot0_eef_pos')
+        if robot_state is not None:
+            robot_state = robot_state.copy()
+
+        gripper_state = final_obs.get('robot0_gripper_qpos')
+        if gripper_state is not None:
+            gripper_state = gripper_state.copy()
+
+        # Convert final observation to image
+        image = self._obs_to_image(final_obs)
+
+        # Clean up
+        del final_obs
+        gc.collect()
+
+        logger.info(f"[RoboSuiteSimulator] Batch complete: {steps_executed} steps, total_reward={total_reward:.4f}")
+
+        return {
+            "success": True,
+            "image": image,
+            "robot_state": robot_state,
+            "gripper_state": gripper_state,
+            "reward": float(total_reward),
+            "done": bool(done),
+            "steps_executed": steps_executed,
+            "raw_action": raw_action,
+            "transformed_action": transformed_action.tolist(),
+        }
+
+    def _render_final_frame(self) -> Image.Image:
+        """
+        Render the current frame using MuJoCo's offscreen renderer directly.
+
+        This bypasses robosuite's observation pipeline for a clean single render.
+        """
+        # Ensure physics is synced
+        self.env.sim.forward()
+
+        # Use MuJoCo's offscreen rendering directly
+        # This is more reliable than going through robosuite's observation system
+        img = self.env.sim.render(
+            camera_name="agentview",
+            width=256,
+            height=256,
+            depth=False,
+        )
+
+        # MuJoCo renders with origin at bottom-left, flip vertically
+        img = np.flipud(img)
+
+        return Image.fromarray(img.astype(np.uint8))
+
+    def _render_current_frame(self) -> Image.Image:
+        """
+        Render the current frame with a fresh render context.
+
+        This avoids OpenGL buffer corruption by explicitly updating the render context.
+        """
+        # Ensure physics state is synced
+        self.env.sim.forward()
+
+        # Get observation with fresh render
+        obs = self.env._get_observations()
+        image = self._obs_to_image(obs)
+
+        # Clear obs reference
+        del obs
+
+        return image
+
     def _euler_to_axis_angle(self, roll: float, pitch: float, yaw: float) -> np.ndarray:
         """
         Convert Euler angles (roll, pitch, yaw) to axis-angle representation.

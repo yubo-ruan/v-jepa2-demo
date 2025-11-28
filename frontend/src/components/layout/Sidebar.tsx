@@ -6,6 +6,7 @@ import {
   HistoryIcon,
   ResearchIcon,
   SimulatorIcon,
+  LiberoIcon,
 } from "@/components/icons";
 import type { MainTab } from "@/types";
 
@@ -19,6 +20,7 @@ export function Sidebar({ isOpen, activeTab, onTabChange }: SidebarProps) {
   const navTabs = useMemo(() => [
     { id: "inference" as const, label: "Inference", icon: <UploadIcon /> },
     { id: "simulator" as const, label: "Simulator", icon: <SimulatorIcon /> },
+    { id: "libero" as const, label: "LIBERO", icon: <LiberoIcon /> },
     { id: "history" as const, label: "History", icon: <HistoryIcon /> },
     { id: "finetune" as const, label: "Fine-tune", icon: <ResearchIcon /> },
   ], []);
